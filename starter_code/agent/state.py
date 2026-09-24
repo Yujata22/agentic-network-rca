@@ -6,25 +6,62 @@ from langgraph.graph.message import add_messages
 
 
 class AgentState(TypedDict, total=False):
-    # Conversation state
+    """
+    Shared state carried through the LangGraph workflow.
+
+    Conversation history and structured investigation context are kept
+    separately so the agent does not need to reconstruct critical state
+    from chat history on every turn.
+    """
+
+    # ------------------------------------------------------------------
+    # Conversation
+    # ------------------------------------------------------------------
+
     messages: Annotated[list, add_messages]
 
-    # Request classification
-    intent: Literal["investigation", "follow_up", "general_qa"]
+    # ------------------------------------------------------------------
+    # Request routing
+    # ------------------------------------------------------------------
 
+    intent: Literal[
+        "investigation",
+        "follow_up",
+        "general_qa",
+    ]
+
+    # ------------------------------------------------------------------
     # Current investigation
+    # ------------------------------------------------------------------
+
     anomaly_id: str | None
+
     anomaly: dict[str, Any] | None
 
-    # Evidence gathered during the investigation
+    # ------------------------------------------------------------------
+    # Evidence gathered
+    # ------------------------------------------------------------------
+
     device_context: list[dict[str, Any]]
+
     syslogs: list[dict[str, Any]]
+
     telemetry: list[dict[str, Any]]
 
-    # Agent reasoning/control state
+    # ------------------------------------------------------------------
+    # Investigation planning / control
+    # ------------------------------------------------------------------
+
+    planned_actions: list[dict[str, Any]]
+
     investigation_summary: str | None
+
     needs_more_evidence: bool
+
     investigation_round: int
 
-    # Final structured result
+    # ------------------------------------------------------------------
+    # Final RCA
+    # ------------------------------------------------------------------
+
     rca: dict[str, Any] | None
