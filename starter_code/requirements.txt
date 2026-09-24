@@ -1,0 +1,35 @@
+# Pre-installed in the provided Jupyter container -- you shouldn't need to
+# add anything to run a complete solution.
+#
+# If you DO install any additional package (e.g. a different LLM provider
+# SDK, langchain-ollama, etc.), please add it to this file with a pinned
+# version before submitting (e.g. `pip freeze | grep <package>`), so your
+# submission is reproducible in a fresh container.
+#
+# Every entry carries an upper bound as well as a lower bound. Without a cap,
+# `>=` floors resolve to whatever the latest release is at build time -- which
+# for the LangChain/LangGraph stack now means the 1.x line, whose API differs
+# from the 0.x API this challenge (and most public LangGraph examples) assume.
+# The caps below keep a fresh `pip install` on the 0.x API and keep builds
+# reproducible across candidates. If you intentionally want a newer major,
+# bump the cap deliberately and re-test.
+
+langgraph>=0.2.60,<0.3
+langchain>=0.3.7,<0.4
+langchain-core>=0.3.15,<0.4
+langchain-openai>=0.2.9,<0.3
+langchain-anthropic>=0.3.0,<0.4
+langchain-google-genai>=2.0.4,<3
+langchain-huggingface>=0.1.2,<0.2
+langsmith>=0.1.147,<0.2
+psycopg2-binary>=2.9.9,<3
+SQLAlchemy>=2.0.35,<3
+pandas>=2.2.2,<3
+python-dotenv>=1.0.1,<2
+rich>=13.9.2,<14
+jupyterlab>=4.2.5,<5
+ipykernel>=6.29.5,<7
+# Pin tornado < 6.5: tornado 6.5.x removed/renamed StaticFileHandler symlink
+# handling in a way incompatible with the bundled jupyter_server, causing
+# 500 errors on all static assets (blank JupyterLab page).
+tornado>=6.4,<6.5

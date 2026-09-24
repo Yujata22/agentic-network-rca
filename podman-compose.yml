@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: rca-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=rca_user
+      - POSTGRES_PASSWORD=rca_password
+      - POSTGRES_DB=network_rca
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+      - ./db/seed:/seed:ro
+    # Stage a container-owned, world-readable copy of the seed files before the
+    # official entrypoint drops privileges to the `postgres` user and runs the
+    # init scripts. The entrypoint starts as root, so this `cp`/`chmod` succeeds
+    # even when the mounted /seed files are owner-only (e.g. 0600) and would
+    # otherwise be unreadable by the postgres user -- which previously caused
+    # `\copy ... Permission denied` and silently-empty tables on a fresh volume.
+    # `exec docker-entrypoint.sh` then hands off to normal Postgres startup
+    # unchanged.
+    command:
+      - bash
+      - -c
+      - |
+        cp -r /seed /seed_internal \
+          && chmod -R a+rX /seed_internal \
+          && exec docker-entrypoint.sh postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rca_user -d network_rca"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  adminer:
+    image: adminer:latest
+    container_name: rca-adminer
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "8081:8080"
+
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rca-jupyter
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - DATABASE_URL=postgresql://rca_user:rca_password@postgres:5432/network_rca
+      # Provide your own LLM API key here (see .env.example / INSTRUCTIONS.md)
+      # -- only whichever one you're actually using needs a value.
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - HUGGINGFACEHUB_API_TOKEN=${HUGGINGFACEHUB_API_TOKEN:-}
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-false}
+      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
+      - LANGCHAIN_PROJECT=agentic-ai-rca-challenge
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./starter_code:/home/jovyan/work
+    command:
+      - start-notebook.py
+      - --NotebookApp.token=
+      - --NotebookApp.password=
+
+volumes:
+  pgdata:
