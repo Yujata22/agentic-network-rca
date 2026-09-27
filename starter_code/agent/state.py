@@ -56,6 +56,8 @@ class AgentState(TypedDict, total=False):
 
     investigation_summary: str | None
 
+    evidence_assessment: dict[str, Any] | None
+
     needs_more_evidence: bool
 
     investigation_round: int

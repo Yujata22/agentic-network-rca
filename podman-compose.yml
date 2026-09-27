@@ -66,6 +66,7 @@ services:
       - LANGCHAIN_PROJECT=agentic-ai-rca-challenge
     ports:
       - "8888:8888"
+      - "8501:8501"
     volumes:
       - ./starter_code:/home/jovyan/work
     command:

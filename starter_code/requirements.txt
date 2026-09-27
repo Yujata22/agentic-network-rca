@@ -33,3 +33,4 @@ ipykernel>=6.29.5,<7
 # handling in a way incompatible with the bundled jupyter_server, causing
 # 500 errors on all static assets (blank JupyterLab page).
 tornado>=6.4,<6.5
+streamlit>=1.39,<2

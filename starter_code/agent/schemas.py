@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +27,10 @@ class IntentDecision(BaseModel):
 
 class InvestigationAction(BaseModel):
     """
-    A single evidence-gathering action proposed by the investigation planner.
+    One evidence-gathering action selected by the planner.
+
+    Tool-specific arguments are represented explicitly and validated
+    deterministically before execution.
     """
 
     tool: Literal[
@@ -37,24 +41,120 @@ class InvestigationAction(BaseModel):
 
     reason: str
 
-    parameters: dict = Field(
-        default_factory=dict,
-        description=(
-            "Arguments required by the selected tool. "
-            "Examples include hostnames, device_ids, start_time, and end_time."
-        ),
-    )
+    hostnames: list[str] | None = None
+    device_ids: list[str] | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    message_type: str | None = None
 
 
 class InvestigationPlan(BaseModel):
     """
     Structured investigation plan produced before tool execution.
+
+    Some LLM providers may emit a single action object when only one
+    evidence action is required. The schema deliberately accepts both
+    a single action and a list; application code normalizes to a list.
     """
 
-    next_actions: list[InvestigationAction]
+    next_actions: list[InvestigationAction] | InvestigationAction
 
-    analysis_focus: list[str]
+    analysis_focus: list[str] | str = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_llm_shape(cls, value):
+        """
+        Tolerate common structured-output variations from the LLM.
+
+        The contract remains list-based, but some providers occasionally emit:
+        - a single action object instead of a list; or
+        - a JSON-encoded action/plan string.
+
+        Normalize those shapes before normal Pydantic validation.
+        """
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return value
+
+        if not isinstance(value, dict):
+            return value
+
+        normalized = dict(value)
+        actions = normalized.get("next_actions", [])
+
+        if isinstance(actions, str):
+            try:
+                actions = json.loads(actions)
+            except json.JSONDecodeError:
+                actions = [actions]
+
+        if isinstance(actions, dict):
+            actions = [actions]
+
+        if isinstance(actions, list):
+            parsed_actions = []
+            for action in actions:
+                if isinstance(action, str):
+                    try:
+                        action = json.loads(action)
+                    except json.JSONDecodeError:
+                        pass
+                parsed_actions.append(action)
+            normalized["next_actions"] = parsed_actions
+
+        focus = normalized.get("analysis_focus", [])
+        if focus is None:
+            normalized["analysis_focus"] = []
+        elif isinstance(focus, str):
+            normalized["analysis_focus"] = [focus]
+
+        return normalized
+
+
+class EvidenceAssessment(BaseModel):
+    """
+    Structured assessment of the evidence collected during an investigation.
+    """
+
+    likely_cause_hypothesis: str = Field(
+        description=(
+            "Most plausible cause supported by the currently available evidence. "
+            "Must not be more specific than the evidence supports."
+        )
+    )
+
+    supporting_findings: list[str] = Field(
+        default_factory=list,
+        description="Important observations that support the current hypothesis.",
+    )
+
+    contradictory_findings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Evidence that conflicts with or weakens the current hypothesis."
+        ),
+    )
+
+    missing_evidence: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Evidence that would materially improve or validate the investigation."
+        ),
+    )
+
+    evidence_sufficient: bool = Field(
+        description=(
+            "True when the available evidence is sufficient to produce a "
+            "responsible RCA; false when another evidence-gathering round is needed."
+        )
+    )
+
+    confidence: Literal["high", "medium", "low"]
+
+    reasoning_summary: str
 
 # ---------------------------------------------------------------------------
 # RCA evidence

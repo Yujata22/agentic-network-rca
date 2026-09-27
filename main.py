@@ -8,6 +8,8 @@ from agent.graph import build_graph
 
 
 def print_rca(rca: dict) -> None:
+    """Render a structured RCA result in a readable CLI format."""
+
     print("\n=== ROOT CAUSE ANALYSIS ===")
     print(f"Root cause : {rca.get('root_cause', 'N/A')}")
     print(f"Confidence : {rca.get('confidence', 'N/A')}")
@@ -52,6 +54,7 @@ def print_rca(rca: dict) -> None:
 def main() -> None:
     app = build_graph()
 
+    # One thread per CLI session preserves conversational investigation state.
     thread_id = f"cli-{uuid.uuid4()}"
 
     config = {
@@ -62,16 +65,13 @@ def main() -> None:
 
     print("Network Investigation Agent")
     print("=" * 40)
-    print(
-        "Enter an anomaly ID, ask a networking question, "
-        "or ask follow-up questions."
-    )
-    print("Type 'exit' or 'quit' to stop.\n")
+    print("Enter an anomaly ID, ask a networking question,")
+    print("or ask follow-up questions about the current investigation.")
+    print("Type 'exit' to quit.\n")
 
     while True:
         try:
             user_input = input("> ").strip()
-
         except (EOFError, KeyboardInterrupt):
             print("\nExiting.")
             break
@@ -95,24 +95,17 @@ def main() -> None:
 
             intent = result.get("intent")
 
-            print(f"\n[intent: {intent}]")
-
             if intent == "investigation" and result.get("rca"):
                 print_rca(result["rca"])
-
             else:
                 messages = result.get("messages", [])
-
                 if messages:
-                    print(messages[-1].content)
-                    print()
+                    print(f"\n{messages[-1].content}\n")
                 else:
-                    print("No response generated.\n")
+                    print("\nNo response generated.\n")
 
         except Exception as exc:
-            print(
-                f"\nError: {type(exc).__name__}: {exc}\n"
-            )
+            print(f"\nError: {type(exc).__name__}: {exc}\n")
 
 
 if __name__ == "__main__":
