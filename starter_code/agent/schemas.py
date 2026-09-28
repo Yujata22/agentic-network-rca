@@ -207,3 +207,50 @@ class RCAResult(BaseModel):
     downstream_impacts: list[str]
 
     recommended_next_checks: list[str]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_list_fields(cls, value):
+        """
+        Normalize common LLM structured-output variations.
+
+        Some providers may emit a single string/object instead of a list
+        when only one item is present. Convert those shapes into lists
+        before normal Pydantic validation.
+        """
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return value
+
+        if not isinstance(value, dict):
+            return value
+
+        normalized = dict(value)
+
+        string_list_fields = [
+            "affected_devices",
+            "contradictory_or_missing_evidence",
+            "downstream_impacts",
+            "recommended_next_checks",
+        ]
+
+        for field_name in string_list_fields:
+            field_value = normalized.get(field_name)
+
+            if field_value is None:
+                normalized[field_name] = []
+
+            elif isinstance(field_value, str):
+                normalized[field_name] = [field_value]
+
+        evidence = normalized.get("supporting_evidence")
+
+        if evidence is None:
+            normalized["supporting_evidence"] = []
+
+        elif isinstance(evidence, dict):
+            normalized["supporting_evidence"] = [evidence]
+
+        return normalized
