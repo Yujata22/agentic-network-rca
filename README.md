@@ -1,554 +1,373 @@
 # Network Investigation Agent for Root Cause Analysis
 
-This project implements a stateful Network Investigation Agent using **LangGraph**.
+A stateful **LangGraph-based Network Investigation Agent** that investigates detected network anomalies using evidence from a provided PostgreSQL database and produces structured, evidence-grounded root cause analyses.
 
-The goal of the agent is simple:
+The agent starts **after anomaly detection**. Given an `anomaly_id`, it decides which evidence is useful, retrieves that evidence through controlled read-only tools, assesses whether the available evidence is sufficient, and either gathers additional evidence or produces a structured RCA.
 
-> Given a detected network anomaly, investigate the available network evidence and explain the most likely root cause, the evidence supporting it, the affected devices and timeframe, the confidence in the conclusion, and what uncertainty still remains.
-
-The agent can also remember an investigation and answer follow-up questions without requiring the anomaly ID again.
+It also supports conversational follow-up questions using retained investigation context and general networking questions without unnecessarily querying the database.
 
 ---
 
-# 1. Problem
+## What Was Provided vs. What I Built
 
-The anomaly detection step has already happened.
+### Provided by the Challenge
 
-The input to this system is an `anomaly_id` from the `detected_anomalies` table.
+The challenge supplied:
 
-The job of the agent is to investigate that anomaly by looking at the available network data and answer questions such as:
-
-- What probably caused the anomaly?
-- Which devices were involved?
-- What happened before and during the anomaly?
-- What evidence supports the conclusion?
-- How confident are we?
-- What information is still missing?
-- What should an engineer inspect next?
-
-The important part of the challenge is that the investigation should not be a hardcoded lookup for each anomaly type.
-
-The agent should decide what evidence it needs based on the current investigation.
-
----
-
-# 2. What Was Provided
-
-The challenge already provided the data and local infrastructure required for the investigation.
-
-This included:
-
-- PostgreSQL 16 database
-- seeded network data
-- 10 detected anomalies
-- Docker / Compose environment
+- PostgreSQL 16 with seeded network data
+- Four evidence tables:
+  - `detected_anomalies`
+  - `network_devices`
+  - `device_syslogs`
+  - `device_telemetry`
+- Docker/Compose environment
 - JupyterLab
 - Adminer
-- database helper code
-- starter LangGraph directory
-- starter CLI
-- schema documentation
+- Database connection helper (`db.py`)
+- Starter `graph.py` and `main.py`
+- Schema documentation and seed data
 
-The database is called:
+The database, container infrastructure, and anomaly-detection data were **not built as part of this submission**.
 
-```text
-network_rca
-```
+### My Implementation
 
-I treated this infrastructure and dataset as the supplied environment and focused my implementation on the **agentic investigation layer**.
+I implemented the investigation layer on top of the supplied environment:
+
+- LangGraph investigation workflow
+- Generic read-only evidence tools
+- Explicit structured investigation state
+- Intent routing
+- LLM-driven investigation planning
+- Deterministic tool execution and parameter validation
+- Evidence sufficiency analysis
+- Bounded multi-round investigation
+- Structured RCA synthesis
+- Conversational follow-up memory
+- General networking Q&A path
+- Evaluation runner across all 10 seeded anomalies
+- Completed CLI interface
+- Lightweight optional Streamlit demonstration layer
 
 ---
 
-# 3. Database and Evidence Sources
+## Architecture
 
-There are four main tables available to the agent.
+The workflow is designed as a controlled **reason → act → observe → assess** loop rather than an unconstrained LLM loop.
 
-| Table | What it represents | Important columns |
+```mermaid
+flowchart TD
+    A[User Input] --> B[Route Request]
+
+    B -->|New anomaly| C[Load Anomaly]
+    B -->|Follow-up| H[Answer Follow-up]
+    B -->|General networking question| I[General Q&A]
+
+    C --> D[Plan Investigation]
+    D --> E[Execute Evidence Tools]
+    E --> F[Analyze Evidence]
+
+    F -->|More evidence required| D
+    F -->|Evidence sufficient / round limit| G[Synthesize Structured RCA]
+
+    G --> J[END]
+    H --> J
+    I --> J
+```
+
+### Why LangGraph?
+
+LangGraph provides explicit control over:
+
+- shared investigation state
+- nodes with single responsibilities
+- conditional routing
+- bounded investigation loops
+- conversational checkpointing
+- separation of reasoning from deterministic execution
+
+The LLM performs semantic reasoning inside selected nodes, while LangGraph determines the allowed execution paths.
+
+The investigation loop is intentionally bounded to prevent uncontrolled execution. The current implementation allows a maximum of three investigation rounds.
+
+### Single-Agent vs. Multi-Agent Design
+
+This implementation is intentionally a **single stateful investigation agent**, not a collection of independent agents.
+
+Responsibilities are separated into specialized LangGraph nodes:
+
+- request routing
+- anomaly loading
+- investigation planning
+- tool execution
+- evidence assessment
+- RCA synthesis
+- conversational follow-up
+- general networking Q&A
+
+These components share the same `AgentState` and participate in one controlled investigation workflow.
+
+I chose this design because the stages are tightly coupled around a single investigation state. Separate autonomous agents would add coordination complexity without providing a clear benefit for the scope of this assignment.
+
+---
+
+## Evidence Tools
+
+The agent exposes generic evidence-source tools rather than anomaly-specific investigation functions.
+
+| Tool | Evidence Source | Purpose |
 |---|---|---|
-| `detected_anomalies` | Output from anomaly detectors. This is the starting point of an investigation. | `anomaly_id`, `severity`, `model_output`, `anomaly_date` |
-| `network_devices` | Device inventory and contextual information about network devices and sites. | `device_id`, `hostname`, `mgmt_ip`, `device_type`, `vendor`, `model`, `role`, `site_code`, `site_name`, `city`, `state`, `region`, `install_date`, `os_version`, `status`, `wan_provider`, `wan_circuit_id`, `wan_circuit_group`, `notes` |
-| `device_syslogs` | Fine-grained timestamped device/network events. | `log_id`, `device_id`, `timestamp`, `severity`, `message_type`, `message` |
-| `device_telemetry` | Hourly operational metrics for devices. | `device_id`, `timestamp`, `cpu_utilization_pct`, `memory_utilization_pct`, `temperature_celsius`, `active_sessions`, `bgp_established_peers`, `interfaces_up_ratio`, `interface_error_count`, `interface_flap_count`, `policy_deny_count`, `latency_ms`, `jitter_ms`, `packet_loss_pct` |
+| `get_anomaly` | `detected_anomalies` | Retrieve anomaly metadata, detector output, impacted hosts and time window |
+| `get_device_context` | `network_devices` | Resolve devices and obtain inventory/topology context |
+| `get_syslogs` | `device_syslogs` | Retrieve time-bounded device events and protocol/system messages |
+| `get_telemetry` | `device_telemetry` | Retrieve time-series network/device metrics |
 
-## Data Dictionary
-
-### `detected_anomalies`
-
-This is the entry point for a new RCA investigation.
-
-| Column | Meaning |
-|---|---|
-| `anomaly_id` | Unique identifier for the detected anomaly |
-| `severity` | Severity assigned to the anomaly |
-| `model_output` | JSONB containing detector-specific information and investigation clues |
-| `anomaly_date` | Date associated with the anomaly |
-
-`model_output` may contain information such as:
-
-- detector type
-- anomaly window
-- impacted hostnames
-- impacted interfaces
-- number of impacted hosts/interfaces
-- signal scores
-- criticality
-- event summaries
-- flap timelines
-
-These fields are treated as **investigation clues**, not automatically as the final root cause.
-
-The supplied data contains six detector types:
+I intentionally did **not** implement functions such as:
 
 ```text
-interface_flap
-interface_error
-interface_availability
-bgp_session
-policy_deny
-sdwan_path_quality
+investigate_interface_flap()
+investigate_bgp()
+investigate_policy_deny()
 ```
 
----
+Instead, the planning node reasons over the anomaly and evidence already collected and decides which evidence source is useful next.
 
-### `network_devices`
-
-This table provides device and topology context.
-
-| Column | Meaning |
-|---|---|
-| `device_id` | Internal device identifier |
-| `hostname` | Network device hostname |
-| `mgmt_ip` | Device management IP |
-| `device_type` | Router, switch, firewall, SD-WAN edge, etc. |
-| `vendor` | Device vendor |
-| `model` | Hardware model |
-| `role` | Functional role of the device |
-| `site_code` | Site identifier |
-| `site_name` | Human-readable site name |
-| `city` | Device/site city |
-| `state` | Device/site state |
-| `region` | Network region |
-| `install_date` | Device installation date |
-| `os_version` | Running operating-system version |
-| `status` | Current inventory status |
-| `wan_provider` | WAN carrier/provider where applicable |
-| `wan_circuit_id` | Associated WAN circuit |
-| `wan_circuit_group` | Logical circuit group |
-| `notes` | Additional contextual/topology information |
-
-The `notes` field is particularly useful because some physical or logical connection information is represented there.
-
-For example, it can help establish that interfaces on two different devices represent opposite ends of the same link.
+The LLM does not execute arbitrary SQL. Application code validates the requested tool and parameters and executes only the allowed read-only evidence tools.
 
 ---
 
-### `device_syslogs`
+## Investigation State
 
-Syslogs provide the most detailed event timeline available in the supplied dataset.
+Conversation history and structured investigation context are stored separately.
 
-| Column | Meaning |
-|---|---|
-| `log_id` | Unique log identifier |
-| `device_id` | Device associated with the event |
-| `timestamp` | Event timestamp |
-| `severity` | Syslog severity |
-| `message_type` | Category/type of network event |
-| `message` | Raw event description |
+The LangGraph `AgentState` contains information such as:
 
-Syslogs are useful for evidence such as:
+```text
+Conversation
+  messages
 
-- physical interface down/up events
-- optical warnings
-- routing adjacency changes
-- BGP events
-- firewall/security events
-- policy denies
-- other device-generated operational messages
+Request routing
+  intent
 
-Because they contain fine-grained timestamps, they are useful for reconstructing event ordering.
+Investigation
+  anomaly_id
+  anomaly
 
----
+Retrieved evidence
+  device_context
+  syslogs
+  telemetry
 
-### `device_telemetry`
+Planning / control
+  planned_actions
+  investigation_summary
+  evidence_assessment
+  needs_more_evidence
+  investigation_round
 
-Telemetry provides quantitative operational measurements over time.
+Result
+  rca
+```
 
-| Column | Meaning |
-|---|---|
-| `device_id` | Device identifier |
-| `timestamp` | Telemetry observation timestamp |
-| `cpu_utilization_pct` | CPU utilization |
-| `memory_utilization_pct` | Memory utilization |
-| `temperature_celsius` | Device temperature |
-| `active_sessions` | Number of active sessions |
-| `bgp_established_peers` | Number of established BGP peers |
-| `interfaces_up_ratio` | Proportion of interfaces currently up |
-| `interface_error_count` | Interface error count |
-| `interface_flap_count` | Interface flap count |
-| `policy_deny_count` | Policy deny count |
-| `latency_ms` | Network latency |
-| `jitter_ms` | Network jitter |
-| `packet_loss_pct` | Packet loss percentage |
-
-Telemetry is useful for determining whether the event seen in logs is also visible in operational metrics and whether the device returns toward its normal state afterward.
-
-All timestamps in the supplied dataset are treated as UTC.
+This prevents critical investigation context from having to be reconstructed from conversational prose on every turn.
 
 ---
 
-# 4. How I Approached the Assignment
+## Conversational Memory
 
-I did not start by immediately connecting an LLM to the database.
+Conversational continuity is implemented using three components:
 
-I built the solution in stages so that data-access problems, agent-reasoning problems, and conversation-memory problems could be tested separately.
+1. **Structured `AgentState`** stores conversation history and investigation context.
+2. **LangGraph `MemorySaver`** is used as the graph checkpointer.
+3. The CLI creates one **`thread_id`** and reuses it for all turns in that session.
 
-## Step 1 — Understand the supplied data
+Therefore, after an investigation completes, a user can ask:
 
-I first inspected the schema and queried the four available tables.
+```text
+Why do you believe this was a physical-layer problem?
+```
 
-This helped answer basic questions such as:
+without supplying the anomaly ID again.
 
-- What evidence is available?
-- How many anomaly types exist?
-- Which anomaly fields identify impacted devices?
-- How granular are syslogs?
-- How granular is telemetry?
-- Where is topology information stored?
+The request router recognizes the request as `follow_up` and routes it to the follow-up path using the retained investigation context rather than starting the anomaly investigation from scratch.
 
-The supplied dataset contains:
-
-- 10 anomalies
-- 6 detector types
-- 21 devices represented in telemetry
-- hourly telemetry observations
-- finer-grained syslog events
-
-This step was important because the agent's tools should reflect the evidence actually available rather than an assumed network data model.
+`MemorySaver` is an in-memory checkpointer. Persistent cross-process/cross-restart memory is discussed under limitations.
 
 ---
 
-# 5. Reference Investigation Before Building the Agent
+## Grounding and Hallucination Controls
 
-Before implementing the autonomous investigation flow, I manually investigated the required challenge anomaly:
+Grounding is primarily enforced through the architecture and evidence flow rather than through a standalone groundedness score.
+
+### 1. Controlled Evidence Sources
+
+Investigation evidence comes from the supplied PostgreSQL tables through explicit read-only tools.
+
+The agent cannot freely query arbitrary external sources or execute arbitrary database operations.
+
+### 2. Evidence Retained in Structured State
+
+Retrieved anomaly metadata, device context, syslogs, and telemetry are retained in the investigation state.
+
+Later reasoning stages therefore operate over the evidence actually collected during the investigation.
+
+### 3. Evidence-Aware RCA Synthesis
+
+The final RCA uses a structured `RCAResult` rather than unrestricted prose.
+
+It contains:
+
+- `root_cause`
+- `confidence`
+- `affected_devices`
+- `timeframe`
+- `supporting_evidence`
+- `contradictory_or_missing_evidence`
+- `downstream_impacts`
+- `recommended_next_checks`
+
+### 4. Explicit Evidence References
+
+Supporting evidence is represented through `EvidenceItem`, including the source of the observation.
+
+Evidence can originate from:
+
+- `detected_anomalies`
+- `network_devices`
+- `device_syslogs`
+- `device_telemetry`
+
+This makes the reasoning easier to inspect and audit.
+
+### 5. Explicit Uncertainty
+
+The agent is instructed not to make the root-cause conclusion more specific than the evidence supports.
+
+Missing or contradictory evidence is represented explicitly rather than hidden from the final answer.
+
+For example, evidence may strongly support physical-layer degradation while still being insufficient to distinguish between:
+
+- a failing transceiver
+- a connector problem
+- a patch cable issue
+- fiber degradation
+
+### Grounding Limitation
+
+These mechanisms improve grounding, but the current evaluation does **not** calculate a quantitative groundedness score.
+
+A stronger production evaluation would compare individual RCA claims against SME-reviewed evidence and resolved incidents.
+
+---
+
+## Worked Example — Interface Flap
+
+Required example:
 
 ```text
 a1f0c8e2-1b44-4d90-9c31-000000000001
 ```
 
-This was not production logic.
+Detector:
 
-It was a reference investigation used to understand what a good RCA should look like and which tables contained useful evidence.
+```text
+interface_flap
+```
 
-The anomaly identified two impacted devices:
+Investigation window:
+
+```text
+2026-07-08T06:00:00Z
+to
+2026-07-08T07:47:00Z
+```
+
+Affected devices:
 
 ```text
 FAIRVIEW-EDG01
 stonebridge-edg01
 ```
 
-Device metadata showed that the impacted interfaces were opposite ends of the same backbone connection.
-
-The syslog sequence showed:
-
-1. optical degradation,
-2. high pre-FEC BER / low receive power,
-3. physical link DOWN,
-4. physical link recovery,
-5. OSPF neighbor disruption,
-6. routing recovery,
-7. another optical warning,
-8. another link flap.
-
-This established an important distinction for the RCA:
+Affected backbone interfaces:
 
 ```text
-Likely cause:
-Optical / physical-layer degradation
-
-Symptoms / downstream effects:
-Physical link flaps -> OSPF disruption -> routing impact
+FAIRVIEW-EDG01      xe-0/0/21
+stonebridge-edg01   xe-0/0/0
 ```
 
-It also showed what could **not** be concluded.
+### Agent RCA
 
-The available evidence does not establish whether the exact physical failure was:
+The agent identified **physical-layer degradation on the backbone link** as the likely cause of the intermittent link flaps.
 
-- the transceiver,
-- a connector,
-- patch cabling,
-- or the fiber itself.
+Confidence:
 
-That uncertainty should therefore remain in the final RCA.
+```text
+high
+```
 
-This reference investigation gave me something concrete against which to validate the agent later.
+### Supporting Evidence
+
+The investigation correlated several observations:
+
+1. FAIRVIEW-EDG01 reported high pre-FEC BER and degraded optical receive power on `xe-0/0/21`.
+2. Rx power was approximately `-18.2 dBm`, below the logged `-15.0 dBm` threshold.
+3. Physical down/up events occurred at matching times across both ends of the backbone link.
+4. OSPF adjacency loss followed the physical link instability.
+5. BGP disruption occurred downstream of the physical-layer events.
+6. Device context showed that the affected interfaces form opposite ends of the same backbone connection.
+
+The temporal ordering and cross-device correlation support treating the OSPF/BGP disruptions as downstream consequences rather than the initiating root cause.
+
+### Explicit Uncertainty
+
+The available evidence supports the broader conclusion of physical/optical degradation but does **not** identify the exact failed physical component.
+
+The available data cannot reliably distinguish between:
+
+- transceiver degradation
+- connector issue
+- patch cable issue
+- fiber degradation
+
+The RCA therefore reports this as missing evidence rather than selecting one unsupported component.
 
 ---
 
-# 6. Building the Tool Layer
+## Conversational Follow-Up Example
 
-The next step was implementing:
-
-```text
-agent/tools.py
-```
-
-I created four generic evidence tools:
+After the RCA, without repeating the anomaly ID:
 
 ```text
-get_anomaly
-get_device_context
-get_syslogs
-get_telemetry
+> Why do you believe this was a physical-layer problem?
+
+[intent: follow_up]
 ```
 
-### `get_anomaly`
+The agent references the retained investigation context, including:
 
-Retrieves the anomaly and its detector metadata using an anomaly ID.
+- optical signal degradation
+- elevated pre-FEC BER
+- correlated physical link-down events
+- subsequent OSPF disruption
+- topology/device context
 
-### `get_device_context`
-
-Retrieves inventory and topology context for impacted hostnames.
-
-### `get_syslogs`
-
-Retrieves device events for selected devices and a selected time window.
-
-### `get_telemetry`
-
-Retrieves operational measurements for selected devices and a selected time window.
-
-I deliberately organized the tools around **data/evidence sources rather than detector types**.
-
-I did not create functions such as:
+A second follow-up:
 
 ```text
-investigate_interface_flap()
-investigate_bgp()
-investigate_sdwan()
+> What uncertainty remains?
+
+[intent: follow_up]
 ```
 
-That would have encoded the investigation workflow directly into application code.
+The agent identifies that the precise failed physical component and corroborating optical statistics from the opposite side of the link remain unavailable.
 
-Instead:
-
-> The tools answer “What evidence can I access?” while the agent decides “Which evidence should I inspect next?”
-
-This is the main scalability principle behind the tool design.
+This demonstrates that conversational context is preserved across turns without requiring the anomaly ID to be repeated.
 
 ---
 
-# 7. Defining Explicit Agent State
+## General Networking Q&A
 
-I next created:
-
-```text
-agent/state.py
-```
-
-An RCA investigation needs more than ordinary chat history.
-
-The graph therefore maintains explicit state containing:
-
-```text
-messages
-intent
-anomaly_id
-anomaly
-device_context
-syslogs
-telemetry
-investigation_summary
-needs_more_evidence
-investigation_round
-rca
-```
-
-I separated the state conceptually into two parts.
-
-### Conversation state
-
-```text
-messages
-```
-
-This allows conversational interaction.
-
-### Investigation state
-
-This contains the anomaly, evidence already collected, investigation progress, and final RCA.
-
-This distinction matters because:
-
-> Chat history and investigation state are not the same thing.
-
-The agent should not have to reconstruct its entire technical investigation by repeatedly parsing previous natural-language messages.
-
----
-
-# 8. Structured Schemas
-
-I created:
-
-```text
-agent/schemas.py
-```
-
-Rather than allowing the LLM to return arbitrary text at every stage, structured Pydantic schemas are used for important decisions and outputs.
-
-For example, an investigation action contains information such as:
-
-```text
-tool
-reason
-hostnames
-device_ids
-start_time
-end_time
-message_type
-```
-
-The final RCA is also structured into fields such as:
-
-```text
-root_cause
-confidence
-affected_devices
-timeframe
-supporting_evidence
-contradictory_or_missing_evidence
-downstream_impacts
-recommended_next_checks
-```
-
-Each supporting evidence item records information such as:
-
-```text
-evidence_id
-source
-description
-device
-timestamp
-```
-
-This provides a lightweight **evidence ledger**.
-
-Structured output makes the system:
-
-- easier to validate,
-- easier to test,
-- easier to display in the UI,
-- and easier to evaluate programmatically.
-
----
-
-# 9. LangGraph Workflow
-
-The main orchestration is implemented through:
-
-```text
-agent/graph.py
-agent/nodes.py
-```
-
-I used LangGraph because the investigation is not a single prompt-response operation.
-
-It is a stateful workflow containing decisions and loops.
-
-The high-level architecture is:
-
-```mermaid
-flowchart TD
-
-    U[User] --> R[Route Request]
-
-    R -->|New anomaly| A[Load Anomaly]
-    R -->|Follow-up| F[Follow-up Answer]
-    R -->|General question| G[General Network Q&A]
-
-    A --> P[Plan Investigation]
-
-    P --> X[Execute Evidence Action]
-
-    X --> D1[get_device_context]
-    X --> D2[get_syslogs]
-    X --> D3[get_telemetry]
-
-    D1 --> E[Analyze Evidence]
-    D2 --> E
-    D3 --> E
-
-    E --> Q{Enough Evidence?}
-
-    Q -->|No| P
-    Q -->|Yes| S[Synthesize RCA]
-
-    S --> M[Retain Investigation State]
-    M --> O[Answer User]
-
-    F --> O
-    G --> O
-
-    DB[(PostgreSQL network_rca)]
-
-    A -. read .-> DB
-    D1 -. read .-> DB
-    D2 -. read .-> DB
-    D3 -. read .-> DB
-```
-
-The important investigation loop is:
-
-```text
-PLAN
-  ↓
-ACT
-  ↓
-OBSERVE
-  ↓
-ANALYZE
-  ↓
-ENOUGH EVIDENCE?
-  ├── No  -> PLAN again
-  └── Yes -> RCA
-```
-
-This gives the LLM controlled autonomy.
-
-The LLM helps determine which evidence should be investigated, but LangGraph controls the possible execution paths.
-
----
-
-# 10. Request Routing
-
-The agent supports three types of requests.
-
-## New investigation
-
-Example:
-
-```text
-a1f0c8e2-1b44-4d90-9c31-000000000001
-```
-
-The agent loads the anomaly and starts an investigation.
-
-## Follow-up
-
-Example:
-
-```text
-Why do you believe this was a physical-layer problem?
-```
-
-or:
-
-```text
-What uncertainty remains?
-```
-
-The agent uses the retained investigation context rather than starting another investigation.
-
-## General networking question
+The request router also supports general networking questions.
 
 Example:
 
@@ -556,541 +375,175 @@ Example:
 What is the difference between a physical interface flap and an OSPF adjacency failure?
 ```
 
-This does not require database evidence.
-
-The agent therefore answers the question directly without unnecessarily querying PostgreSQL.
-
-This routing avoids turning every user message into an expensive database investigation.
-
----
-
-# 11. Investigation Planning
-
-The planning logic lives in:
+This is routed as:
 
 ```text
-agent/nodes.py
+general_qa
 ```
 
-After the anomaly is loaded, the planner receives:
+and can be answered directly without unnecessarily querying PostgreSQL.
 
-- anomaly metadata,
-- evidence already collected,
-- current investigation summary.
-
-It then selects the next evidence action.
-
-For example:
+The graph therefore explicitly separates:
 
 ```text
-get_device_context
-```
-
-may be selected when only hostnames are known.
-
-After device IDs are available, the agent may decide that:
-
-```text
-get_syslogs
-```
-
-or:
-
-```text
-get_telemetry
-```
-
-is required.
-
-The planner is instructed to prefer the **minimum evidence required to test the current hypothesis**.
-
-It is also prevented from requesting invalid tool parameters.
-
-Application code validates the tool arguments before execution.
-
-This means the LLM participates in planning, while deterministic application code protects the execution boundary.
-
----
-
-# 12. Evidence Sufficiency and Investigation Loop
-
-After evidence has been retrieved, the agent determines whether enough evidence exists to make a grounded RCA.
-
-If evidence is insufficient:
-
-```text
-Analyze Evidence
-      ↓
-Need more evidence
-      ↓
-Planner
-      ↓
-Another evidence tool
-```
-
-If evidence is sufficient:
-
-```text
-Analyze Evidence
-      ↓
-Evidence sufficient
-      ↓
-Generate RCA
-```
-
-The graph also maintains:
-
-```text
-investigation_round
-```
-
-This prevents an uncontrolled agent loop.
-
-Therefore the implementation is not:
-
-```python
-while True:
-    ask_llm()
-```
-
-Instead, autonomy operates inside explicit LangGraph boundaries.
-
----
-
-# 13. Structured RCA
-
-The final RCA separates several concepts that are easy to mix together in free-form text.
-
-Example structure:
-
-```text
-Root cause
-Confidence
-Affected devices
-Timeframe
-Supporting evidence
-Missing / contradictory evidence
-Downstream impacts
-Recommended next checks
-```
-
-This is particularly useful for network investigations because a symptom should not automatically become the root cause.
-
-For example:
-
-```text
-Optical signal degradation
-        ↓
-Physical interface flap
-        ↓
-OSPF neighbor loss
-        ↓
-Routing disruption
-```
-
-The first item may represent the likely cause while the others represent consequences.
-
----
-
-# 14. Conversational Memory
-
-LangGraph checkpointing is used to preserve state for the same conversation thread.
-
-That allows this interaction:
-
-```text
-User:
-a1f0c8e2-1b44-4d90-9c31-000000000001
-
-Agent:
-<structured RCA>
-
-User:
-Why do you believe this was a physical-layer problem?
-
-Agent:
-<answers using previous investigation>
-
-User:
-What uncertainty remains?
-
-Agent:
-<answers using retained evidence>
-```
-
-The anomaly ID does not need to be supplied again.
-
-This satisfies the conversational follow-up requirement while avoiding another full investigation.
-
----
-
-# 15. CLI
-
-The supplied `main.py` initially contained the CLI shell with a TODO for invoking the graph.
-
-I completed this file so that the CLI now:
-
-- builds the LangGraph application,
-- creates a conversation thread,
-- sends user messages into the graph,
-- prints the structured RCA,
-- supports follow-up questions,
-- supports general questions.
-
-Run:
-
-```bash
-python main.py
+investigation
+follow_up
+general_qa
 ```
 
 ---
 
-# 16. Lightweight Streamlit UI
+## Evaluation
 
-I also added:
+I added an evaluation runner to execute the same investigation workflow across the supplied anomaly dataset.
+
+The dataset contains **10 seeded anomalies across six detector types**:
+
+- `interface_flap`
+- `policy_deny`
+- `sdwan_path_quality`
+- `bgp_session`
+- `interface_availability`
+- `interface_error`
+
+### Final Evaluation
 
 ```text
-streamlit_app.py
+Total anomalies:          10
+Successful executions:    10
+Failed executions:         0
+Detector types covered:    6
+Average investigation:    ~2 rounds
+Average runtime:          ~11 seconds
 ```
 
-The Streamlit application is intentionally lightweight.
+The current evaluation primarily measures **execution robustness and investigation behavior**, including:
 
-It is only a presentation layer around the same LangGraph application.
+- successful graph completion
+- detector coverage
+- investigation depth
+- end-to-end latency
+- generation of structured RCA output
 
-It does not contain a separate RCA implementation.
+### Important Interpretation
 
-The goal is to make the investigation easier to demonstrate visually while keeping all reasoning and evidence logic in the agent layer.
+`10/10` is an **execution success rate**, not a claim of 100% RCA accuracy.
 
-Run:
+The supplied dataset does not provide SME-reviewed ground-truth RCA labels for every anomaly.
 
-```bash
-streamlit run streamlit_app.py \
-    --server.address 0.0.0.0 \
-    --server.port 8501
-```
+A stronger production evaluation could include:
+
+- SME-reviewed root-cause correctness
+- evidence groundedness / claim support
+- relevant-evidence retrieval metrics such as Recall@K
+- tool-selection accuracy
+- tool-argument correctness
+- unnecessary/repeated tool-call rate
+- confidence calibration
+- latency and cost
+- provider failure/retry rate
+
+The evaluation runner is detector-agnostic and can execute additional anomaly IDs without introducing detector-specific evaluation logic.
+
+At larger scale I would add controlled concurrency, provider-aware rate limiting, retry/backoff, persistent evaluation results, resumability, and a versioned SME-labeled benchmark.
 
 ---
 
-# 17. Evaluation
+## Known Limitations
 
-I added an evaluation layer under:
+### 1. No Complete RCA Ground Truth
 
-```text
-eval/
-```
+Execution can be evaluated across all supplied anomalies, but semantic RCA accuracy cannot be fully measured without SME-reviewed incident resolutions.
 
-The evaluation runner executes the agent against all supplied anomalies and records information including:
+### 2. In-Memory Conversational Checkpointing
 
-- anomaly ID
-- detector type
-- severity
-- success/failure
-- investigation rounds
-- confidence
-- affected devices
-- device context retrieved
-- syslogs retrieved
-- telemetry retrieved
-- supporting evidence count
-- missing evidence count
-- root cause
+`MemorySaver` supports follow-up within the running application, but state does not persist across process/container restarts.
+
+A production implementation should use a persistent checkpointer or external backing store.
+
+### 3. LLM Provider Dependency
+
+Investigation reasoning depends on an external model provider and is therefore subject to:
+
 - latency
-- execution error
+- availability
+- quota limits
+- rate limits
 
-Detailed results are written to:
+### 4. Limited Physical Diagnostics
 
-```text
-eval/results/evaluation_results.csv
-```
+The supplied evidence can indicate physical/optical degradation but cannot always isolate the precise failed component.
 
-The final execution run covered all 10 supplied anomalies:
+### 5. Limited Topology Representation
 
-```text
-Total anomalies:       10
-Successful runs:       10
-Failed runs:            0
-Average investigation: 2.00 rounds
-```
+Some topology context is inferred from supplied device metadata/notes rather than a dedicated topology graph.
 
-Detector coverage:
+### 6. No Autonomous Remediation
 
-| Detector | Successful executions |
-|---|---:|
-| `bgp_session` | 1 / 1 |
-| `interface_availability` | 1 / 1 |
-| `interface_error` | 1 / 1 |
-| `interface_flap` | 2 / 2 |
-| `policy_deny` | 3 / 3 |
-| `sdwan_path_quality` | 2 / 2 |
+The agent investigates and recommends next checks.
 
-This demonstrates that the workflow executes across every detector type in the supplied dataset.
+It intentionally does not modify network configuration or execute remediation.
 
-It should **not** be interpreted as 100% RCA semantic accuracy.
+### 7. Grounding Is Architecturally Encouraged, Not Formally Verified
 
-A true semantic accuracy benchmark would require independently reviewed gold-standard RCA labels for every anomaly.
+Evidence-source restrictions, structured evidence, and explicit uncertainty reduce unsupported conclusions, but production deployment would benefit from claim-level verification against retrieved evidence.
 
 ---
 
-# 18. Required Worked Example
+## Running the CLI
 
-For:
-
-```text
-a1f0c8e2-1b44-4d90-9c31-000000000001
-```
-
-the agent identified:
-
-```text
-Likely root cause:
-Physical / optical-layer degradation on the backbone connection
-between FAIRVIEW-EDG01 and stonebridge-edg01.
-```
-
-Supporting evidence included:
-
-- low optical receive power,
-- high pre-FEC BER,
-- repeated optical warnings,
-- synchronized physical link DOWN/UP events,
-- routing disruption following the physical event.
-
-The agent returned:
-
-```text
-Confidence: high
-```
-
-while still identifying missing evidence.
-
-The exact failed physical component could not be determined from the supplied data.
-
-It could be associated with:
-
-- fiber,
-- connector/patch cable,
-- or transceiver optics.
-
-The agent therefore recommends additional physical/optical diagnostics rather than inventing a more specific failure.
-
----
-
-# 19. Files I Added or Modified
-
-The implementation is deliberately separated by responsibility.
-
-| File | Purpose | My work |
-|---|---|---|
-| `agent/tools.py` | Database evidence tools | Added generic anomaly, device, syslog and telemetry retrieval tools |
-| `agent/state.py` | LangGraph state | Defined explicit conversation and investigation state |
-| `agent/schemas.py` | Structured models | Added planning/action and structured RCA schemas |
-| `agent/nodes.py` | Agent reasoning | Implemented routing, planning, evidence analysis, follow-up and RCA logic |
-| `agent/graph.py` | LangGraph orchestration | Built nodes, edges, conditional routing, investigation loop and memory |
-| `main.py` | CLI | Completed supplied CLI and connected it to the graph |
-| `eval/run_eval.py` | Evaluation | Added repeatable evaluation across supplied anomalies |
-| `eval/results/evaluation_results.csv` | Evaluation artifact | Stores detailed evaluation results |
-| `streamlit_app.py` | Demo UI | Added lightweight frontend around the same agent |
-| `docs/implementation_notes.md` | Engineering notes | Recorded design decisions and reference investigation |
-| `README.md` | Documentation | Architecture, implementation and run instructions |
-| `requirements.txt` | Dependencies | Added any additional runtime dependency required by the implementation |
-| `podman-compose.yml` | Supplied environment | Only extended as needed to expose the Streamlit UI port |
-
----
-
-# 20. Project Structure
-
-```text
-agentic-ai-rca-challenge/
-│
-├── README.md
-├── Dockerfile
-├── podman-compose.yml
-│
-├── docs/
-│   ├── schema_reference.md
-│   └── implementation_notes.md
-│
-└── starter_code/
-    │
-    ├── db.py
-    ├── main.py
-    ├── streamlit_app.py
-    ├── requirements.txt
-    │
-    ├── agent/
-    │   ├── __init__.py
-    │   ├── state.py
-    │   ├── schemas.py
-    │   ├── tools.py
-    │   ├── nodes.py
-    │   └── graph.py
-    │
-    ├── eval/
-    │   ├── run_eval.py
-    │   └── results/
-    │       └── evaluation_results.csv
-    │
-    └── notebooks/
-        └── network_rca_agent.ipynb
-```
-
----
-
-# 21. Running the Project
-
-Start the environment from the repository root:
+Start the supplied environment:
 
 ```bash
 docker compose -f podman-compose.yml up -d
 ```
 
-The supplied Compose configuration mounts:
-
-```text
-./starter_code
-```
-
-from the local repository into:
-
-```text
-/home/jovyan/work
-```
-
-inside the Jupyter container.
-
-Enter the container:
+Enter the application container:
 
 ```bash
 docker exec -it rca-jupyter bash
 cd /home/jovyan/work
 ```
 
-Run the CLI:
+Run:
 
 ```bash
 python main.py
 ```
 
-Run evaluation:
-
-```bash
-python -m eval.run_eval
-```
-
-Run Streamlit:
-
-```bash
-streamlit run streamlit_app.py \
-    --server.address 0.0.0.0 \
-    --server.port 8501
-```
-
----
-
-# 22. Main Design Decisions
-
-### 1. Generic evidence tools
-
-Tools represent evidence sources rather than anomaly-specific workflows.
-
-This allows the same investigation architecture to work across multiple detector types.
-
-### 2. Explicit investigation state
-
-I did not rely only on chat history.
-
-The graph keeps structured evidence and investigation progress.
-
-### 3. Controlled autonomy
-
-The LLM decides what evidence would be useful, but LangGraph controls where execution can go.
-
-### 4. Read-only investigation
-
-The system investigates and recommends next checks.
-
-It does not modify network configuration or perform autonomous remediation.
-
-### 5. Evidence-grounded conclusions
-
-The final RCA separates:
+Then provide an anomaly ID:
 
 ```text
-cause
-evidence
-impact
-confidence
-uncertainty
+a1f0c8e2-1b44-4d90-9c31-000000000001
 ```
 
-If the available evidence cannot establish something, the agent should say so.
-
-### 6. Minimum necessary evidence
-
-The planner is encouraged to retrieve evidence that tests the current hypothesis rather than blindly querying every table for every anomaly.
-
-### 7. One agent, multiple interfaces
-
-The CLI and Streamlit application use the same LangGraph implementation.
-
-The UI does not contain a second investigation workflow.
+Follow-up questions can then be entered directly in the same CLI session.
 
 ---
 
-# 23. Limitations
+## Database Inspection
 
-The system is intentionally scoped to the supplied challenge environment.
-
-Current limitations include:
-
-- RCA quality depends on the evidence available in the seeded dataset.
-- Physical root causes cannot always be isolated to an exact component.
-- Detailed network topology is limited.
-- Telemetry is less granular than syslog events.
-- LLM provider rate limits can affect batch evaluation throughput.
-- The evaluation dataset is small.
-- Execution success across the supplied anomalies does not by itself establish semantic RCA accuracy.
-
-A production version could add:
-
-- a larger SME-reviewed RCA benchmark,
-- richer topology data,
-- incident/change-management evidence,
-- additional telemetry sources,
-- persistent investigation storage,
-- agent tracing and observability,
-- semantic RCA evaluation.
-
----
-
-# 24. Summary
-
-I approached this assignment as an **investigation problem rather than an anomaly-detection problem**.
-
-The anomaly detector tells us:
-
-> Something unusual happened.
-
-The Network Investigation Agent tries to answer:
-
-> What most likely happened, what evidence supports that conclusion, what was affected, and what do we still not know?
-
-The implementation combines:
+The supplied Adminer instance is available at:
 
 ```text
-LangGraph
-    +
-structured investigation state
-    +
-generic PostgreSQL evidence tools
-    +
-LLM-based planning
-    +
-controlled evidence loops
-    +
-structured RCA
-    +
-conversation memory
+http://localhost:8081
 ```
 
-to make that investigation evidence-driven, explainable, and conversational.
+The primary evidence tables are:
+
+| Table | Purpose |
+|---|---|
+| `detected_anomalies` | Anomaly metadata and detector output |
+| `network_devices` | Inventory and device/topology context |
+| `device_syslogs` | Timestamped network/device events |
+| `device_telemetry` | Time-series device/network metrics |
+
+---
+
+## Design Summary
+
+The central design principle is **controlled agent autonomy**:
+
+> The LLM decides what evidence is useful and interprets that evidence; deterministic application code controls which tools can execute; LangGraph maintains state and constrains control flow; and the final RCA explicitly separates supporting evidence from uncertainty.
+
+This avoids both extremes of a completely hardcoded anomaly-specific workflow and an unconstrained LLM agent loop.
