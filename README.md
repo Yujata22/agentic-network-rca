@@ -1,27 +1,27 @@
 # Network Investigation Agent for Root Cause Analysis
 
-A stateful, tool-using **LangGraph Network Investigation Agent** for investigating detected network anomalies and producing structured, evidence-grounded root cause analyses from PostgreSQL network data.
+A stateful, tool-using **LangGraph Network Investigation Agent** that investigates detected network anomalies and produces structured root cause analyses (RCAs) using evidence stored in PostgreSQL.
 
-The system begins **after anomaly detection**.
+The system starts **after anomaly detection**.
 
-Given an `anomaly_id`, the agent:
+Given an `anomaly_id`, the agent can:
 
-1. retrieves the anomaly,
-2. determines what additional evidence is relevant,
-3. queries controlled network evidence sources,
-4. correlates observations across devices and time,
-5. evaluates whether the available evidence is sufficient,
-6. gathers more evidence when necessary,
-7. produces a structured RCA with explicit confidence and uncertainty,
-8. retains the investigation so follow-up questions can be answered without repeating the anomaly ID.
+1. retrieve the detected anomaly,
+2. decide what additional evidence is useful,
+3. query controlled network evidence sources,
+4. correlate events across devices and time,
+5. assess whether the evidence is sufficient,
+6. gather more evidence when needed,
+7. produce a structured RCA with confidence and uncertainty,
+8. retain the investigation so the user can ask follow-up questions without repeating the anomaly ID.
 
-It also supports general networking questions without unnecessarily querying the database.
+The same application can also answer general networking questions without unnecessarily querying the investigation database.
 
 ---
 
 # 1. Challenge Boundary: What Was Provided vs. What I Built
 
-A useful distinction in this project is between the **provided infrastructure/data layer** and the **investigation agent implemented for the challenge**.
+A key distinction in this project is between the infrastructure/data supplied with the challenge and the investigation agent I built on top of it.
 
 ## Provided by the Challenge
 
@@ -44,132 +44,119 @@ The challenge supplied the underlying development environment and network datase
 | Schema documentation | Yes |
 | Seed data | Yes |
 
-The PostgreSQL database, anomaly detection results, Docker infrastructure, Jupyter environment, and dataset were **not built as part of this submission**.
+The PostgreSQL database, seeded anomalies, Docker environment, Jupyter environment, and source dataset were therefore **not built as part of this submission**.
 
 ## What I Implemented
 
 I built the investigation layer on top of the supplied environment:
 
-- LangGraph orchestration workflow
-- explicit `AgentState`
+- LangGraph investigation workflow
+- explicit investigation state
 - intent classification and routing
 - generic read-only PostgreSQL evidence tools
-- LLM-driven investigation planning
+- LLM-based investigation planning
 - deterministic tool validation and execution
 - evidence sufficiency assessment
 - bounded iterative investigation
 - structured RCA generation
-- explicit uncertainty representation
+- explicit uncertainty handling
 - conversational memory
 - follow-up question handling
 - general networking Q&A
-- structured Pydantic contracts
-- provider-isolated LLM configuration
-- evaluation across all seeded anomalies
-- thin-evidence behavior evaluation
+- Pydantic output contracts
+- isolated LLM configuration
+- end-to-end evaluation across all seeded anomalies
+- retrieval-quality evaluation
+- claim-level groundedness evaluation
+- thin-evidence behavior testing
 - completed CLI
 - optional Streamlit demonstration UI
 
-The resulting architecture intentionally separates:
+The main design idea is to separate:
 
-**reasoning → orchestration → data access → state → output validation**
+**LLM reasoning → LangGraph orchestration → controlled data access → structured state → validated output**
 
-rather than allowing an LLM to freely execute actions.
+The LLM can reason about what to investigate, but it does not have unrestricted control over the application or database.
 
 ---
 
 # 2. System Architecture
 
-The system follows a controlled:
+The investigation follows a controlled loop:
 
 **Reason → Act → Observe → Assess → Conclude**
 
-architecture.
-
 ```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              USER / CLI                                      │
-│                                                                             │
-│  anomaly_id          follow-up question          networking question        │
-└───────────────┬────────────────────┬──────────────────────────┬──────────────┘
-                │                    │                          │
-                └────────────────────┴────────────┬─────────────┘
-                                                  ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    LANGGRAPH INVESTIGATION AGENT                             │
-│                    agent/graph.py + agent/nodes.py                           │
-│                                                                             │
-│                         ┌──────────────────┐                                  │
-│                         │  ROUTE REQUEST   │                                  │
-│                         │     [NODE]       │                                  │
-│                         └────────┬─────────┘                                  │
-│                                  │                                            │
-│               ┌──────────────────┼──────────────────┐                         │
-│               │                  │                  │                         │
-│               ▼                  ▼                  ▼                         │
-│        investigation         follow_up          general_qa                    │
-│               │                  │                  │                         │
-│               ▼                  ▼                  ▼                         │
-│      ┌────────────────┐  ┌────────────────┐  ┌────────────────┐             │
-│      │ LOAD ANOMALY   │  │ ANSWER FOLLOW- │  │ GENERAL Q&A    │             │
-│      │    [NODE]      │  │ UP [NODE]      │  │    [NODE]      │             │
-│      └───────┬────────┘  └────────┬───────┘  └────────┬───────┘             │
-│              │                    │                   │                      │
-│              ▼                    │                   │                      │
-│      ┌────────────────┐           │                   │                      │
-│      │ PLAN           │           │                   │                      │
-│      │ INVESTIGATION  │           │                   │                      │
-│      │    [NODE]      │           │                   │                      │
-│      └───────┬────────┘           │                   │                      │
-│              │                    │                   │                      │
-│              ▼                    │                   │                      │
-│      ┌────────────────┐           │                   │                      │
-│      │ EXECUTE        │───────────────┐               │                      │
-│      │ EVIDENCE TOOLS │               │               │                      │
-│      │    [NODE]      │               │               │                      │
-│      └───────┬────────┘               │               │                      │
-│              │                        │               │                      │
-│              ▼                        │               │                      │
-│      ┌────────────────┐               │               │                      │
-│      │ ANALYZE        │               │               │                      │
-│      │ EVIDENCE       │               │               │                      │
-│      │    [NODE]      │               │               │                      │
-│      └───────┬────────┘               │               │                      │
-│              │                        │               │                      │
-│       conditional edge                │               │                      │
-│              │                        │               │                      │
-│       ┌──────┴────────────┐           │               │                      │
-│       │                   │           │               │                      │
-│ needs more           sufficient       │               │                      │
-│ evidence             evidence         │               │                      │
-│       │                   │           │               │                      │
-│       │                   ▼           │               │                      │
-│       │           ┌────────────────┐  │               │                      │
-│       └──────────►│ SYNTHESIZE RCA │  │               │                      │
-│   loop to PLAN    │     [NODE]     │  │               │                      │
-│                   └───────┬────────┘  │               │                      │
-│                           │           │               │                      │
-└───────────────────────────┼───────────┼───────────────┼──────────────────────┘
-                            │           │               │
-                            └───────────┴───────────────┘
-                                        │
-                                        ▼
-                              STRUCTURED RESPONSE
+┌─────────────────────────────────────────────────────────────────────┐
+│                            USER / CLI                               │
+│                                                                     │
+│    anomaly_id          follow-up question       networking question │
+└──────────┬──────────────────────┬───────────────────────┬───────────┘
+           │                      │                       │
+           └──────────────────────┴──────────┬────────────┘
+                                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                  LANGGRAPH INVESTIGATION AGENT                      │
+│                  agent/graph.py + agent/nodes.py                    │
+│                                                                     │
+│                         ┌───────────────┐                            │
+│                         │ ROUTE REQUEST │                            │
+│                         └───────┬───────┘                            │
+│                                 │                                   │
+│              ┌──────────────────┼──────────────────┐                │
+│              ▼                  ▼                  ▼                │
+│        investigation        follow_up          general_qa           │
+│              │                  │                  │                │
+│              ▼                  ▼                  ▼                │
+│       ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
+│       │ LOAD ANOMALY│    │   ANSWER    │    │ GENERAL Q&A │        │
+│       └──────┬──────┘    │  FOLLOW-UP  │    └─────────────┘        │
+│              │           └─────────────┘                           │
+│              ▼                                                      │
+│       ┌─────────────┐                                               │
+│       │    PLAN     │                                               │
+│       │INVESTIGATION│                                               │
+│       └──────┬──────┘                                               │
+│              ▼                                                      │
+│       ┌─────────────┐         ┌──────────────────────────┐          │
+│       │   EXECUTE   │────────►│ Controlled Evidence Tools│          │
+│       │    TOOLS    │         │ PostgreSQL (read-only)   │          │
+│       └──────┬──────┘         └──────────────────────────┘          │
+│              ▼                                                      │
+│       ┌─────────────┐                                               │
+│       │   ANALYZE   │                                               │
+│       │   EVIDENCE  │                                               │
+│       └──────┬──────┘                                               │
+│              │                                                      │
+│       ┌──────┴───────────────┐                                     │
+│       │                      │                                     │
+│  more evidence         evidence sufficient                         │
+│       │                      │                                     │
+│       ▼                      ▼                                     │
+│      PLAN              ┌──────────────┐                            │
+│       ▲                │SYNTHESIZE RCA│                            │
+│       └────────────────┤              │                            │
+│                        └──────┬───────┘                            │
+└───────────────────────────────┼─────────────────────────────────────┘
+                                ▼
+                         STRUCTURED RESPONSE
 ```
 
-The investigation loop is bounded to a maximum of **three investigation rounds**, preventing an uncontrolled LLM/tool loop.
+The investigation loop is limited to a maximum of **three investigation rounds**.
+
+This prevents an uncontrolled LLM/tool loop while still allowing the agent to gather more evidence when its first investigation round is not enough.
 
 ---
 
 # 3. LangGraph Concepts Used
 
-The implementation deliberately uses the main LangGraph primitives explicitly.
+The implementation uses LangGraph's main concepts directly: **nodes, edges, state, routing, and checkpointing**.
 
 ## Node
 
-A **node** performs one unit of work.
+A **node** performs one step of the workflow.
 
-Implemented primarily in:
+Most nodes are implemented in:
 
 ```text
 agent/nodes.py
@@ -188,17 +175,17 @@ answer_follow_up
 answer_general_qa
 ```
 
-A node answers:
+In simple terms:
 
-> "What work happens at this stage?"
+> A node answers: **"What work happens at this stage?"**
 
 ---
 
 ## Edge
 
-An **edge** determines which node executes next.
+An **edge** decides which node runs next.
 
-Defined in:
+Edges are defined in:
 
 ```text
 agent/graph.py
@@ -208,47 +195,46 @@ For example:
 
 ```text
 load_anomaly
-      │
-      ▼
+     │
+     ▼
 plan_investigation
-      │
-      ▼
+     │
+     ▼
 execute_planned_actions
-      │
-      ▼
+     │
+     ▼
 analyze_evidence
 ```
 
-Conditional edges allow the graph to make controlled decisions.
-
-For example:
+Conditional edges handle decisions such as:
 
 ```text
                     analyze_evidence
                            │
                     ┌──────┴──────┐
                     │             │
-             more evidence     sufficient
+             need more        sufficient
+              evidence          evidence
                     │             │
                     ▼             ▼
-            plan_investigation   synthesize_rca
+            plan again      synthesize_rca
 ```
 
-The LLM can therefore influence the investigation without controlling arbitrary program execution.
+This gives the LLM room to reason while keeping the overall execution path controlled by the application.
 
 ---
 
 ## Intent
 
-`intent` represents what kind of request the current user input is.
+`intent` represents the type of request the user is making.
 
-Stored in:
+It is stored in:
 
 ```text
 agent/state.py
 ```
 
-Supported values are:
+Supported intents are:
 
 ```text
 investigation
@@ -256,18 +242,18 @@ follow_up
 general_qa
 ```
 
-The routing node classifies the request and LangGraph follows the corresponding edge.
+The routing flow is:
 
 ```text
                        USER INPUT
                            │
                            ▼
-                    route_request
+                     route_request
                            │
-          ┌────────────────┼────────────────┐
-          │                │                │
-          ▼                ▼                ▼
-   investigation       follow_up        general_qa
+             ┌─────────────┼─────────────┐
+             │             │             │
+             ▼             ▼             ▼
+      investigation    follow_up     general_qa
 ```
 
 ---
@@ -276,7 +262,7 @@ The routing node classifies the request and LangGraph follows the corresponding 
 
 State is the agent's structured working memory.
 
-Defined in:
+It is defined in:
 
 ```text
 agent/state.py
@@ -313,13 +299,13 @@ AgentState
     └── rca
 ```
 
-This distinction is important:
+An important design choice is that:
 
-> **Chat history is not the same thing as investigation state.**
+> **Chat history and investigation state are not the same thing.**
 
-Conversation messages retain dialogue.
+Messages preserve the conversation.
 
-Structured state retains the actual investigation context.
+Structured state preserves the actual investigation: anomaly information, evidence, investigation progress, evidence assessment, and final RCA.
 
 ---
 
@@ -328,59 +314,51 @@ Structured state retains the actual investigation context.
 For a new anomaly:
 
 ```text
-User
- │
- │ anomaly_id
- ▼
-route_request
- │
- │ intent = investigation
- ▼
-load_anomaly
- │
- │ get anomaly metadata
- ▼
-plan_investigation
- │
- │ LLM asks:
- │ "What evidence would help test the current hypothesis?"
- ▼
-execute_planned_actions
- │
- ├── get_device_context
- ├── get_syslogs
- └── get_telemetry
- │
- ▼
-PostgreSQL
- │
- │ evidence returned
- ▼
-AgentState
- │
- ▼
-analyze_evidence
- │
- │ "Is the evidence sufficient?"
- │
- ├──────────── NO ──────────────┐
- │                              │
- │                              ▼
- │                     plan_investigation
- │                              │
- │                       another evidence
- │                           round
- │
- └──────────── YES
-                │
-                ▼
-        synthesize_rca
-                │
-                ▼
-         Structured RCA
+User provides anomaly_id
+          │
+          ▼
+     route_request
+          │
+          │ intent = investigation
+          ▼
+      load_anomaly
+          │
+          │ retrieve anomaly metadata
+          ▼
+   plan_investigation
+          │
+          │ What evidence would help?
+          ▼
+ execute_planned_actions
+          │
+          ├── get_device_context
+          ├── get_syslogs
+          └── get_telemetry
+          │
+          ▼
+      PostgreSQL
+          │
+          │ evidence returned
+          ▼
+       AgentState
+          │
+          ▼
+    analyze_evidence
+          │
+          │ Is the evidence sufficient?
+          │
+      ┌───┴───────────────┐
+      │                   │
+      NO                  YES
+      │                   │
+      ▼                   ▼
+plan_investigation   synthesize_rca
+      │                   │
+      └── next round      ▼
+                    Structured RCA
 ```
 
-This is **not**:
+The workflow is deliberately **not** hardcoded like this:
 
 ```python
 if detector == "interface_flap":
@@ -388,95 +366,97 @@ if detector == "interface_flap":
     query_telemetry()
 ```
 
-The planner receives the current anomaly and already-collected evidence and decides what evidence is useful next.
+Instead, the planner receives the current anomaly and evidence already collected and decides which evidence source would be useful next.
 
-That allows the same workflow to operate across different detector types.
+That allows the same investigation workflow to work across different anomaly types.
 
 ---
 
 # 5. Why LangGraph?
 
-A plain Python loop could repeatedly call an LLM, but that would make control flow, memory, termination, and tool boundaries much less explicit.
+A normal Python loop could repeatedly call an LLM and tools, but the workflow would be harder to control, inspect, and maintain.
 
-LangGraph provides:
+LangGraph gives this project:
 
-- explicit state
-- named nodes
-- deterministic edges
-- conditional routing
-- bounded loops
-- checkpointing
-- conversational continuity
-- inspectable control flow
-- separation between reasoning and execution
+- explicit state,
+- named workflow stages,
+- controlled transitions,
+- conditional routing,
+- bounded investigation loops,
+- checkpointing,
+- conversational continuity,
+- clearer debugging and testing.
 
-The architecture follows:
+The responsibilities are separated like this:
 
 ```text
 LLM
  │
- │ semantic reasoning
+ │ decides what evidence is useful
+ │ and interprets the evidence
  ▼
 LangGraph
  │
- │ controls allowed transitions
+ │ controls workflow and allowed transitions
  ▼
 Application Code
  │
- │ validates tool + parameters
+ │ validates tool calls and parameters
  ▼
-PostgreSQL Tools
+PostgreSQL Evidence Tools
 ```
 
-A concise description is:
+In one sentence:
 
-> The LLM decides what evidence it wants and interprets that evidence. LangGraph controls when those decisions occur and what paths are allowed. Python validates and executes the approved tools.
+> The LLM handles semantic reasoning, LangGraph controls the workflow, and Python validates and executes the allowed tools.
 
 ---
 
-# 6. Single-Agent Design
+# 6. Why a Single Agent?
 
-This implementation is intentionally a **single stateful Network Investigation Agent**.
+This implementation is intentionally a **single stateful Network Investigation Agent**, not a multi-agent system.
 
-It is not presented as a multi-agent system.
+Planning, evidence analysis, RCA synthesis, follow-up handling, and general Q&A are specialized nodes inside the same LangGraph workflow.
 
-The planner, evidence analyzer, RCA synthesizer, follow-up handler, and Q&A handler are specialized **nodes within one LangGraph agent**, sharing the same `AgentState`.
+They all share the same `AgentState`.
 
 ```text
-              Network Investigation Agent
-                         │
-       ┌─────────────────┼─────────────────┐
-       │                 │                 │
-    Planning         Evidence          Conversation
-      Node            Analysis             Nodes
-       │                 │                 │
-       └─────────────────┼─────────────────┘
-                         │
-                    shared state
+             Network Investigation Agent
+                        │
+          ┌─────────────┼─────────────┐
+          │             │             │
+       Planning      Evidence     Conversation
+         Node        Analysis        Nodes
+          │             │             │
+          └─────────────┼─────────────┘
+                        │
+                   Shared State
 ```
 
-For this problem, the investigation stages are tightly coupled around one incident context. Introducing independent autonomous agents would add coordination and state-synchronization complexity without a clear benefit.
+For this challenge, all investigation stages work on the same incident context.
+
+Using multiple autonomous agents would introduce extra coordination and state synchronization without a clear benefit for this scope.
 
 ---
 
 # 7. Evidence Tools
 
-Implemented in:
+Evidence tools are implemented in:
 
 ```text
 agent/tools.py
 ```
 
-The tools are organized around **evidence sources**, not anomaly types.
+They are organized around **data sources**, not anomaly types.
 
 | Tool | PostgreSQL Source | Purpose |
 |---|---|---|
 | `get_anomaly` | `detected_anomalies` | Retrieve anomaly metadata and detector output |
-| `get_device_context` | `network_devices` | Resolve devices and obtain inventory/topology context |
-| `get_syslogs` | `device_syslogs` | Retrieve time-bounded system/network events |
-| `get_telemetry` | `device_telemetry` | Retrieve time-series network/device metrics |
+| `get_device_context` | `network_devices` | Retrieve device inventory and topology context |
+| `get_syslogs` | `device_syslogs` | Retrieve time-bounded network/device events |
+| `get_telemetry` | `device_telemetry` | Retrieve time-series device/network measurements |
 
-I deliberately did not implement:
+I deliberately did not create functions such as:
 
 ```text
 investigate_interface_flap()
@@ -484,7 +464,7 @@ investigate_bgp()
 investigate_policy_deny()
 ```
 
-because those would encode anomaly-specific investigation paths.
+because that would hardcode the investigation path by anomaly type.
 
 Instead:
 
@@ -494,7 +474,7 @@ Anomaly
    ▼
 Planner
    │
-   │ chooses evidence source
+   │ decides what evidence is useful
    ▼
 Validated Tool Call
    │
@@ -502,9 +482,9 @@ Validated Tool Call
 PostgreSQL
 ```
 
-The LLM also does **not** generate and execute arbitrary SQL.
+The LLM also cannot generate arbitrary SQL and execute it directly.
 
-Only known, read-only application tools can execute.
+Only known read-only application tools are allowed.
 
 ---
 
@@ -524,32 +504,30 @@ gpt-4.1-mini
 temperature = 0
 ```
 
-The investigation architecture itself is provider-independent because nodes obtain the model through the isolated LLM configuration module.
+The rest of the architecture is not tied directly to that provider.
 
-During development, the workflow was initially exercised using Gemini. The provider could subsequently be changed without modifying:
+During development, the workflow was initially tested with Gemini. Because model configuration is isolated, the provider could be changed without redesigning:
 
-- LangGraph topology
-- state representation
-- PostgreSQL tools
-- investigation logic
-- memory mechanism
-- evaluation structure
+- LangGraph topology,
+- state,
+- PostgreSQL tools,
+- investigation logic,
+- memory,
+- evaluation code.
 
-This separation keeps model configuration outside the business logic.
+This keeps provider-specific configuration separate from the main application logic.
 
 ---
 
-# 9. Structured Contracts
+# 9. Structured Outputs
 
-Implemented in:
+Important LLM outputs are validated using Pydantic schemas in:
 
 ```text
 agent/schemas.py
 ```
 
-Pydantic schemas constrain important model outputs.
-
-Key structures include:
+Key schemas include:
 
 ```text
 IntentDecision
@@ -560,7 +538,7 @@ EvidenceItem
 RCAResult
 ```
 
-For example, `RCAResult` explicitly separates:
+For example, the final `RCAResult` separates:
 
 ```text
 root_cause
@@ -573,58 +551,56 @@ downstream_impacts
 recommended_next_checks
 ```
 
-This is preferable to asking the model to return an unrestricted paragraph because important RCA components can be inspected and evaluated independently.
+This is easier to inspect and evaluate than one unrestricted paragraph.
 
-Provider-output normalization is also applied at the schema boundary where appropriate so semantically valid outputs with minor structural variation can still be validated safely.
+Some normalization is also performed at the schema boundary so minor differences in provider output format do not unnecessarily break an otherwise valid response.
 
 ---
 
 # 10. Conversational Memory
 
-Conversational continuity uses three pieces.
+Conversation continuity uses three pieces:
 
 ```text
-             AgentState
-                 │
-        WHAT is remembered
-                 │
-                 ▼
-             MemorySaver
-                 │
-        HOW state is checkpointed
-                 │
-                 ▼
-              thread_id
-                 │
-        WHICH conversation owns it
+AgentState
+    │
+    │ WHAT is remembered
+    ▼
+MemorySaver
+    │
+    │ HOW state is checkpointed
+    ▼
+thread_id
+    │
+    │ WHICH conversation the state belongs to
 ```
 
-## 1. AgentState
+## AgentState
 
 Stores:
 
-- messages
-- anomaly
-- evidence
-- evidence assessment
-- investigation progress
-- final RCA
+- messages,
+- anomaly,
+- retrieved evidence,
+- evidence assessment,
+- investigation progress,
+- final RCA.
 
-## 2. MemorySaver
+## MemorySaver
 
-The graph is compiled with LangGraph's:
+The LangGraph application is compiled with:
 
 ```text
 MemorySaver
 ```
 
-checkpointer.
+as its checkpointer.
 
-## 3. thread_id
+## thread_id
 
-The CLI creates one thread ID before entering the conversation loop and reuses it for subsequent invocations.
+The CLI creates one `thread_id` before entering the conversation loop and reuses it for later requests.
 
-Implemented through:
+The relevant implementation is in:
 
 ```text
 main.py
@@ -644,19 +620,22 @@ Therefore:
 [intent: follow_up]
 ```
 
-does not require the anomaly ID again.
+does not require the user to enter the anomaly ID again.
 
-The previous investigation is recovered from the same LangGraph thread.
+The existing investigation is recovered from the same LangGraph thread.
 
 ---
 
 # 11. Grounding and Hallucination Controls
 
-Grounding is enforced primarily through architecture and evidence flow.
+Grounding is handled in two ways:
+
+1. **architectural controls**, which restrict what evidence the agent can use and how it can access it;
+2. **evaluation**, which tests whether relevant evidence was retrieved and whether generated claims are supported by that evidence.
 
 ## Controlled Evidence Sources
 
-Investigation evidence comes from four supplied PostgreSQL sources:
+Investigation evidence comes from the supplied PostgreSQL sources:
 
 ```text
 detected_anomalies
@@ -665,53 +644,53 @@ device_syslogs
 device_telemetry
 ```
 
-The LLM cannot freely access arbitrary external evidence.
+The investigation workflow does not freely search for external evidence.
 
 ---
 
 ## Evidence Stored in State
 
-Retrieved evidence is stored in structured `AgentState`.
+Retrieved evidence is stored in `AgentState`.
 
-Therefore subsequent reasoning operates over evidence that was actually retrieved during the investigation.
+Later reasoning therefore operates on evidence that was actually collected during the investigation.
 
 ---
 
 ## Controlled Tool Execution
 
-The LLM proposes evidence needs.
+The LLM can propose what evidence it wants.
 
-Application code validates:
+Application code validates the requested:
 
-- tool name
-- device IDs / hostnames
-- time ranges
-- required parameters
+- tool,
+- device,
+- time range,
+- parameters,
 
-before executing a tool.
+before executing it.
 
 The model cannot directly execute arbitrary SQL or database writes.
 
 ---
 
-## Structured Supporting Evidence
+## Evidence References in the RCA
 
-The final RCA contains explicit `EvidenceItem` entries identifying the source and observation.
+The final RCA contains structured supporting-evidence entries.
 
-Example:
+For example:
 
 ```text
 [LOG-002117] device_syslogs:
 High pre-FEC BER and degraded Rx optical power...
 ```
 
-This makes the evidence chain auditable.
+This makes it easier to trace a conclusion back to the evidence used to support it.
 
 ---
 
 ## Explicit Missing Evidence
 
-The model is required to represent uncertainty.
+The agent is also expected to say what it does **not** know.
 
 For example:
 
@@ -720,23 +699,15 @@ Likely domain:
 physical / optical degradation
 
 Known:
-link flaps
-optical degradation
-OSPF disruption
+- link flaps
+- optical degradation
+- OSPF disruption
 
-Unknown:
-fiber vs transceiver vs connector
+Still unknown:
+- fiber vs transceiver vs connector
 ```
 
-The agent should therefore stop at the level of specificity supported by the evidence.
-
----
-
-## Grounding Limitation
-
-The current implementation does **not** calculate a formal numerical groundedness metric.
-
-The architecture reduces hallucination risk, but a stronger production evaluation would perform claim-level verification against retrieved evidence and SME-reviewed incident resolutions.
+The goal is to stop at the level of detail supported by the evidence rather than inventing a more specific explanation.
 
 ---
 
@@ -778,7 +749,7 @@ stonebridge-edg01    xe-0/0/0
 
 ## RCA
 
-The agent concluded that the most likely cause was:
+The most likely cause identified by the agent was:
 
 > **Physical-layer degradation on the backbone uplink causing intermittent link flaps.**
 
@@ -790,24 +761,24 @@ high
 
 ## Evidence Chain
 
-The agent correlated:
+The investigation correlated:
 
 1. high pre-FEC BER,
 2. Rx optical power around `-18.2 dBm`,
 3. a logged threshold around `-15.0 dBm`,
 4. physical link-down/up events,
 5. matching events at both ends of the link,
-6. subsequent OSPF neighbor loss,
-7. subsequent BGP disruption,
+6. OSPF neighbor loss after the link problem,
+7. downstream BGP disruption,
 8. device context showing the interfaces are opposite ends of the same backbone link.
 
-The temporal ordering supports:
+The sequence is consistent with:
 
 ```text
-Optical / physical degradation
+Physical / optical degradation
              │
              ▼
-       physical link flap
+      Physical link flap
              │
              ▼
       OSPF adjacency loss
@@ -816,24 +787,26 @@ Optical / physical degradation
         BGP disruption
 ```
 
-rather than treating OSPF or BGP as the initiating root cause.
+This is why the agent treats the OSPF and BGP events as downstream effects rather than the initiating cause.
 
-## Uncertainty
+## Remaining Uncertainty
 
-The evidence does **not** establish whether the exact physical failure is:
+The available evidence does not identify the exact failed physical component.
 
-- fiber
-- transceiver
-- connector
-- patch cable
+It could be related to:
 
-The final RCA therefore reports the broader supported failure domain and explicitly preserves this uncertainty.
+- fiber,
+- transceiver,
+- connector,
+- patch cable.
+
+The RCA therefore reports the broader **physical/optical failure domain** while keeping the exact component unresolved.
 
 ---
 
-# 13. Follow-Up Conversation Example
+# 13. Follow-Up Conversation
 
-After the investigation:
+After the RCA is generated:
 
 ```text
 > Why do you believe this was a physical-layer problem?
@@ -841,9 +814,9 @@ After the investigation:
 [intent: follow_up]
 ```
 
-The response uses the retained RCA and evidence rather than requiring another investigation.
+The response uses the retained investigation and supporting evidence rather than starting over.
 
-A second example:
+Another example:
 
 ```text
 > What uncertainty remains?
@@ -851,9 +824,9 @@ A second example:
 [intent: follow_up]
 ```
 
-The agent identifies the missing opposite-side optical diagnostics and inability to distinguish the exact physical component.
+The agent can explain what evidence is still missing.
 
-Another tested follow-up:
+A third tested follow-up was:
 
 ```text
 > what are different anomalies being reported?
@@ -861,19 +834,19 @@ Another tested follow-up:
 [intent: follow_up]
 ```
 
-The agent can reason over the retained investigation and distinguish:
+The agent can reason over the retained investigation and distinguish between:
 
 - physical interface flaps,
 - OSPF neighbor-down events,
-- downstream BGP peer disruption.
+- downstream BGP disruption.
 
-This validates the conversational-memory requirement.
+This demonstrates the conversational-memory requirement.
 
 ---
 
 # 14. General Networking Q&A
 
-General networking questions follow a separate graph path.
+General networking questions use a separate graph path.
 
 Example:
 
@@ -884,24 +857,243 @@ Example:
 [intent: general_qa]
 ```
 
-The model explains that:
+The response explains that:
 
-- an interface flap is primarily a Layer 1 / Layer 2 link-state event,
-- an OSPF adjacency failure is a Layer 3 routing-protocol relationship failure,
-- a physical flap can cause OSPF adjacency loss,
-- but an OSPF failure does not necessarily imply physical link failure.
+- an interface flap is mainly a Layer 1 / Layer 2 link-state event,
+- an OSPF adjacency failure is a Layer 3 routing relationship failure,
+- a physical flap can cause an OSPF adjacency failure,
+- but an OSPF failure does not necessarily mean the physical link failed.
 
-No investigation-specific PostgreSQL retrieval is required for this path.
-
-This satisfies the requirement that domain questions can be answered without unnecessary database queries.
+This path does not require investigation-specific PostgreSQL retrieval.
 
 ---
 
-# 15. Thin-Evidence Behavior
+# 15. Evaluation Strategy
 
-A separate thin-evidence test was added to verify that the evidence-analysis component does not automatically produce high confidence when supporting context is intentionally removed.
+The system is evaluated at several different levels because an agent can fail in different ways.
 
-The test supplies:
+For example:
+
+- it may retrieve the wrong evidence,
+- retrieve incomplete evidence,
+- generate claims that are not supported,
+- become overconfident when evidence is missing,
+- or fail to complete the workflow.
+
+For that reason, the evaluation is split into:
+
+1. **retrieval quality**,
+2. **generation groundedness**,
+3. **thin-evidence behavior**,
+4. **end-to-end execution robustness**.
+
+---
+
+# 16. Retrieval Quality Evaluation
+
+A small human-curated benchmark was created for three representative anomaly types:
+
+```text
+interface_flap
+policy_deny
+sdwan_path_quality
+```
+
+For each benchmark incident, a set of evidence concepts that should ideally be retrieved was defined.
+
+Examples include:
+
+```text
+optical degradation
+physical link flap
+topology relationship
+OSPF disruption
+policy deny events
+affected firewall
+packet-loss degradation
+WAN circuit context
+SD-WAN path event
+```
+
+Across the three benchmark incidents:
+
+```text
+Benchmark incidents:          3
+Required evidence concepts:  16
+Retrieved concepts:          13
+Evidence Recall:          0.812
+```
+
+So the agent retrieved:
+
+```text
+13 / 16 = 81.2%
+```
+
+of the manually defined evidence concepts.
+
+The missed concepts were:
+
+```text
+deny_count_telemetry
+affected_branch_device
+path_quality_telemetry
+```
+
+This is useful because it shows that the retrieval layer is not perfect.
+
+The agent can still reach a useful investigation result without retrieving every possible evidence item, but the misses identify where the planner/retrieval process could be improved.
+
+The evaluation can be run with:
+
+```bash
+PYTHONPATH=/home/jovyan/work python eval/evaluate_retrieval.py
+```
+
+Results are written to:
+
+```text
+eval/results/retrieval_results.csv
+```
+
+## What Evidence Recall Means Here
+
+For this benchmark:
+
+```text
+Evidence Recall =
+retrieved required evidence concepts
+------------------------------------
+total required evidence concepts
+```
+
+This is a **small curated benchmark**, not a production-wide retrieval score.
+
+Its purpose is to provide a transparent way to test whether the investigation is finding evidence that a human reviewer considered important.
+
+---
+
+# 17. Generation Groundedness Evaluation
+
+Retrieval quality answers:
+
+> **Did the agent collect the evidence it should have collected?**
+
+Generation groundedness asks a different question:
+
+> **Are the factual claims in the RCA supported by the evidence the agent actually retrieved?**
+
+The groundedness evaluator takes the generated RCA and breaks it into factual claims.
+
+Each claim is then evaluated against the evidence collected during that investigation.
+
+A claim can be classified as:
+
+```text
+SUPPORTED
+UNSUPPORTED
+CONTRADICTED
+NOT_VERIFIABLE
+```
+
+Across the same three benchmark incidents:
+
+```text
+Total factual claims:       25
+Supported:                  24
+Unsupported:                 0
+Contradicted:                0
+Not verifiable:              1
+
+Supported Claim Ratio:   0.960
+```
+
+So:
+
+```text
+24 / 25 = 96.0%
+```
+
+of the evaluated factual claims were supported by retrieved evidence.
+
+The one `NOT_VERIFIABLE` claim concerned whether the observed firewall-policy behavior was intentionally designed that way.
+
+The evidence showed that the policy blocked traffic, but it did not prove operator intent.
+
+That distinction is important: the evaluator did not automatically treat every generated statement as supported.
+
+The evaluation can be run with:
+
+```bash
+PYTHONPATH=/home/jovyan/work python eval/evaluate_groundedness.py
+```
+
+Results are written to:
+
+```text
+eval/results/groundedness_results.csv
+```
+
+## Important Interpretation
+
+The **96.0% supported-claim ratio is not 96% RCA accuracy**.
+
+It means that, on this small benchmark, 24 of the 25 factual claims evaluated by the groundedness process were supported by evidence retrieved during the investigation.
+
+End-to-end RCA correctness would require a larger set of incidents with SME-reviewed final resolutions.
+
+---
+
+# 18. Retrieval Completeness vs. Generation Grounding
+
+The two evaluation results measure different things:
+
+```text
+Retrieval Evidence Recall        81.2%
+Generation Supported Claims      96.0%
+```
+
+These numbers are not expected to be the same.
+
+Retrieval evaluation asks:
+
+> Did the investigation retrieve all evidence concepts that the benchmark expected?
+
+Generation evaluation asks:
+
+> Given the evidence that was retrieved, did the RCA stay supported by that evidence?
+
+The results suggest that the agent did not retrieve every potentially useful evidence concept, but it was relatively conservative about the factual claims it generated from the evidence it did retrieve.
+
+In other words:
+
+```text
+Retrieval completeness
+        │
+        │ 81.2%
+        ▼
+Evidence available to the agent
+        │
+        ▼
+RCA generation
+        │
+        │ 96.0% of evaluated claims supported
+        ▼
+Structured RCA
+```
+
+This helps separate two different improvement areas:
+
+- **retrieval improvement** — find more of the relevant evidence,
+- **generation grounding** — avoid making claims beyond the evidence that was found.
+
+---
+
+# 19. Thin-Evidence Behavior
+
+A separate test checks what happens when corroborating evidence is intentionally removed.
+
+The test provides:
 
 ```text
 anomaly metadata : YES
@@ -917,21 +1109,21 @@ Confidence          : medium
 Evidence sufficient : False
 ```
 
-The assessment explicitly reports missing evidence such as:
+The evidence-analysis stage explicitly reports missing information such as:
 
-- device/configuration context,
+- device context,
 - syslogs,
 - interface counters,
-- error-rate/physical-layer telemetry,
-- topology context.
+- physical-layer/error telemetry,
+- topology information.
 
-The reasoning correctly states that the available anomaly metadata suggests link instability but is insufficient to confidently isolate the root-cause domain.
+Instead of forcing a precise RCA, it reports that the available evidence is insufficient.
 
-This is an important behavior:
+This demonstrates an important behavior:
 
-> **Evidence scarcity is represented as uncertainty rather than being converted into a fabricated precise RCA.**
+> **Missing evidence is represented as uncertainty rather than automatically being converted into a confident root-cause story.**
 
-The test can be run with:
+Run with:
 
 ```bash
 PYTHONPATH=/home/jovyan/work python eval/test_thin_evidence.py
@@ -939,15 +1131,11 @@ PYTHONPATH=/home/jovyan/work python eval/test_thin_evidence.py
 
 ---
 
-# 16. Evaluation
+# 20. End-to-End Dataset Evaluation
 
-Evaluation was performed at two levels.
+The same LangGraph investigation workflow was also run across all **10 supplied anomalies**.
 
-## A. End-to-End Dataset Evaluation
-
-The same investigation graph was run across all **10 supplied anomalies**.
-
-The anomalies span six detector types:
+The dataset covers six detector types:
 
 ```text
 interface_flap
@@ -958,7 +1146,7 @@ interface_availability
 interface_error
 ```
 
-Final execution results:
+Observed execution results:
 
 ```text
 Total anomalies:          10
@@ -969,90 +1157,100 @@ Average investigation:    ~2 rounds
 Average runtime:          ~11 seconds
 ```
 
-The evaluation therefore tests:
+This evaluates:
 
-- graph completion
-- detector coverage
-- structured RCA generation
-- investigation depth
-- latency
-- robustness across anomaly types
+- graph completion,
+- detector coverage,
+- structured RCA generation,
+- investigation depth,
+- runtime,
+- workflow robustness across different anomaly types.
 
-### Important Interpretation
+## Important Interpretation
 
-The `10/10` result is an **execution success rate**.
+The `10/10` result means that all ten workflows completed successfully.
 
-It is **not** a claim of 100% RCA semantic accuracy.
+It does **not** mean that the system achieved 100% RCA accuracy.
 
-The supplied dataset does not contain SME-reviewed ground-truth root causes for every anomaly.
-
----
-
-## B. Thin-Evidence Evaluation
-
-A targeted test removes corroborating evidence before invoking the evidence-analysis stage.
-
-Observed:
-
-```text
-confidence          = medium
-evidence_sufficient = False
-```
-
-This specifically tests the requirement:
-
-> An anomaly where evidence is thin should report lower confidence rather than inventing a tidy story.
+The supplied dataset does not provide SME-reviewed final root causes for every incident.
 
 ---
 
-# 17. Evaluation Scalability
+# 21. Evaluation Summary
 
-The evaluation framework is detector-agnostic.
+The evaluation currently covers four different behaviors:
 
-It does not require:
+| Evaluation Layer | Scope | Result |
+|---|---|---:|
+| Retrieval quality | 3 curated incidents / 16 evidence concepts | **81.2% evidence recall** |
+| Generation grounding | 25 factual claims | **96.0% supported-claim ratio** |
+| Thin-evidence behavior | Evidence ablation test | **medium confidence / insufficient evidence** |
+| Workflow robustness | 10 seeded anomalies / 6 detector types | **10/10 completed** |
 
-```text
-evaluate_interface_flap()
-evaluate_bgp()
-evaluate_policy()
-```
+These metrics answer different questions and should not be combined into one overall "accuracy" number.
 
-Instead, additional anomaly IDs can be passed through the same graph.
+---
 
-This makes the execution evaluation naturally extensible to larger anomaly datasets.
+# 22. Evaluation Limitations and Future Improvements
 
-For larger-scale production evaluation I would add:
+The evaluation is intentionally small and should not be treated as a production-calibrated benchmark.
 
-- controlled concurrency,
-- provider-aware rate limiting,
-- retry/backoff,
-- resumable execution,
-- persistent result storage,
-- token/cost tracking,
-- versioned prompts,
-- model-version tracking,
-- SME-labeled benchmark cases.
+## Small Curated Retrieval Benchmark
 
-With labeled incident data, additional metrics could include:
+The retrieval benchmark currently covers three incidents and 16 manually defined evidence concepts.
+
+A stronger benchmark would include many more resolved incidents across additional detector types and network conditions.
+
+## Automated Groundedness Evaluation
+
+The claim-level groundedness evaluator provides a useful automated check, but it is not a replacement for expert review.
+
+A production evaluation should compare claims against:
+
+- SME-reviewed incident resolutions,
+- authoritative network state,
+- known root causes,
+- verified remediation outcomes.
+
+## No Complete RCA Ground Truth
+
+The supplied dataset does not contain final SME-reviewed root causes for every anomaly.
+
+Therefore, semantic RCA accuracy cannot currently be measured reliably across the full dataset.
+
+## Future Metrics
+
+With a larger labeled dataset, useful metrics would include:
 
 | Evaluation Dimension | Example Metric |
 |---|---|
-| RCA correctness | SME agreement / classification accuracy |
-| Evidence retrieval | Recall@K |
+| RCA correctness | SME agreement / root-cause accuracy |
+| Evidence retrieval | Recall@K / evidence recall |
 | Tool selection | tool-selection accuracy |
 | Tool parameters | argument correctness |
 | Grounding | supported-claim ratio |
-| Efficiency | unnecessary tool-call rate |
+| Efficiency | unnecessary/repeated tool calls |
 | Confidence | calibration / reliability |
 | Runtime | p50 / p95 latency |
 | Cost | tokens / investigation |
 | Reliability | provider failure rate |
 
+For larger-scale evaluation I would also add:
+
+- controlled concurrency,
+- provider-aware rate limiting,
+- retry/backoff,
+- resumable runs,
+- persistent result storage,
+- token/cost tracking,
+- prompt versioning,
+- model-version tracking.
+
 ---
 
-# 18. Confidence Interpretation
+# 23. Confidence Interpretation
 
-Confidence is currently an LLM-assessed categorical field constrained to:
+Confidence is currently an LLM-assessed categorical value:
 
 ```text
 high
@@ -1060,20 +1258,18 @@ medium
 low
 ```
 
-It reflects the model's assessment of the strength and consistency of the available evidence.
+It represents the model's assessment of the strength and consistency of the available evidence.
 
 It is **not a statistically calibrated probability**.
 
-This distinction became visible during testing.
+For example, during testing, one planned-maintenance anomaly contained a strong change reference directly in its anomaly metadata. The model returned `high` confidence even though additional syslogs and telemetry were unavailable.
 
-For example, a planned-maintenance anomaly contained an explicit change reference in anomaly metadata. The model returned `high` confidence even though corroborating syslogs and telemetry were unavailable.
+That behavior shows why the current confidence field should be understood as an evidence-based LLM judgment rather than a probability.
 
-The metadata itself was highly diagnostic, so the model was confident in the explanation, but this demonstrates that the confidence value is a semantic LLM judgment rather than a calibrated probability.
-
-A production implementation should improve this through:
+A production implementation could improve this with:
 
 - deterministic evidence-quality signals,
-- SME-reviewed resolved incidents,
+- SME-reviewed incidents,
 - confidence calibration,
 - historical reliability analysis,
 - separate confidence dimensions.
@@ -1085,94 +1281,102 @@ Failure-domain confidence: HIGH
 Exact-component confidence: LOW
 ```
 
-may be more useful than a single confidence value.
-
-The interface-flap example illustrates this distinction:
+The interface-flap example demonstrates this distinction:
 
 ```text
 HIGH confidence:
-physical-layer degradation
+physical / optical degradation
 
 LOWER confidence:
-fiber vs SFP vs connector vs cable
+fiber vs transceiver vs connector vs cable
 ```
 
 ---
 
-# 19. Known Limitations
+# 24. Known Limitations
 
-## 1. No Complete RCA Ground Truth
+## 1. Retrieval Is Not Complete
 
-The supplied dataset does not contain SME-reviewed final incident resolutions for every anomaly.
+The curated retrieval benchmark achieved **81.2% evidence recall**.
 
-Therefore semantic RCA accuracy cannot be measured reliably across the full dataset.
+The current planner therefore does not always retrieve every evidence source that a human benchmark considers useful.
+
+This is a clear area for improvement.
 
 ---
 
-## 2. Confidence Is Not Calibrated
+## 2. Groundedness Benchmark Is Small
 
-Confidence is currently an LLM-generated categorical assessment.
+Claim-level evaluation achieved a **96.0% supported-claim ratio** on 25 factual claims across three benchmark incidents.
+
+This is useful evidence of current behavior, but the sample is too small to treat the result as a general production guarantee.
+
+---
+
+## 3. No Complete RCA Ground Truth
+
+The supplied dataset does not provide SME-reviewed final incident resolutions for every anomaly.
+
+End-to-end semantic RCA accuracy therefore cannot be reliably calculated across the full dataset.
+
+---
+
+## 4. Confidence Is Not Calibrated
+
+Confidence is an LLM-generated categorical assessment.
 
 It should not be interpreted as a probability.
 
-Production confidence should be calibrated against resolved incidents and potentially combined with deterministic evidence-quality criteria.
-
 ---
 
-## 3. In-Memory Checkpointing
+## 5. In-Memory Checkpointing
 
-`MemorySaver` supports conversational continuity while the application is running.
+`MemorySaver` preserves conversation state while the application process is running.
 
-State does not survive process/container restart.
+The state does not survive a process/container restart.
 
 A production system should use a persistent LangGraph checkpointer or external state store.
 
 ---
 
-## 4. External LLM Dependency
+## 6. External LLM Dependency
 
-The reasoning layer depends on an external LLM provider and is therefore exposed to:
+The reasoning layer depends on an external LLM provider and can therefore be affected by:
 
 - latency,
 - quota limits,
 - rate limits,
-- transient provider errors,
+- temporary provider errors,
 - model behavior changes.
 
-The provider configuration is isolated so the model backend can be changed without redesigning the graph.
+The provider configuration is isolated so the backend can be changed without redesigning the workflow.
 
 ---
 
-## 5. Physical Diagnostics Are Limited
+## 7. Limited Physical Diagnostics
 
-The supplied dataset can indicate a physical/optical problem but does not always contain enough diagnostics to distinguish:
+The dataset can indicate a physical/optical problem but may not contain enough information to distinguish between:
 
 ```text
 fiber
-SFP/transceiver
+transceiver
 connector
 patch cable
 ```
 
 ---
 
-## 6. Limited Explicit Topology Model
+## 8. Limited Explicit Topology Model
 
 Some topology relationships are inferred from device metadata and notes.
 
-A production network investigation system would ideally query an authoritative topology/CMDB source.
+A production implementation should ideally query an authoritative topology or CMDB source.
 
 ---
 
-## 7. Grounding Is Not Formally Scored
+## 9. No Autonomous Remediation
 
-The architecture strongly constrains evidence sources and preserves evidence references, but no quantitative claim-level groundedness metric is currently calculated.
-
----
-
-## 8. No Autonomous Remediation
-
-The agent investigates and recommends next checks.
+The agent investigates incidents and recommends next checks.
 
 It intentionally does **not**:
 
@@ -1181,15 +1385,15 @@ It intentionally does **not**:
 - shut interfaces,
 - execute remediation.
 
-This keeps the challenge focused on investigation rather than operational automation.
+This keeps the system focused on investigation and avoids unsafe autonomous network changes.
 
 ---
 
-# 20. Development Environment Setup
+# 25. Development Environment
 
 The project uses the Docker/Compose environment supplied with the challenge.
 
-## Initial Build / Setup
+## First Build
 
 For a fresh environment:
 
@@ -1197,22 +1401,20 @@ For a fresh environment:
 docker compose -f podman-compose.yml up --build -d
 ```
 
-The initial local build took approximately **~80 minutes** on the development machine.
+The first local build took approximately **80 minutes** on the development machine.
 
-This was environment setup time — **not agent investigation runtime**.
+This was environment setup time, **not investigation runtime**.
 
-The long initial build was associated with constructing the supplied container environment and installing the relatively large Python / ML / LangChain / LangGraph dependency stack.
+Likely contributors include:
 
-Contributing factors can include:
-
-- downloading Python packages,
+- downloading the Python dependency stack,
 - dependency resolution,
-- large package installation,
+- installation of larger packages,
 - Docker layer creation,
 - local disk/network performance,
-- cache misses.
+- an empty Docker/package cache on the first build.
 
-Once the environment was built, normal startup does not require repeating the full build.
+Once the environment is built, the full build does not need to be repeated for normal startup.
 
 ## Normal Startup
 
@@ -1220,7 +1422,7 @@ Once the environment was built, normal startup does not require repeating the fu
 docker compose -f podman-compose.yml up -d
 ```
 
-Check:
+Check containers:
 
 ```bash
 docker ps
@@ -1241,41 +1443,40 @@ python main.py
 
 ---
 
-# 21. Improving Container Setup for Production
+# 26. Improving the Container Setup
 
-The initial setup time could be improved by:
+For a production environment, setup time could be improved by:
 
 - pinning dependency versions,
 - maintaining a reproducible lock file,
 - separating dependency layers from application-code layers,
-- maximizing Docker layer caching,
-- avoiding dependency-layer invalidation when only Python source changes,
-- using a pre-built dependency base image,
-- publishing the application image to a container registry.
+- making better use of Docker layer caching,
+- using a prebuilt dependency image,
+- publishing the final image to a container registry.
 
-For example, production distribution could become:
+A production delivery flow could look like:
 
 ```text
-Developer CI
-     │
-     ▼
-Build + Test Image
-     │
-     ▼
+Developer / CI
+      │
+      ▼
+ Build + Test Image
+      │
+      ▼
 Container Registry
-     │
-     ▼
-Reviewer / Deployment
-     │
-     ▼
-docker pull
+      │
+      ▼
+Deployment / Reviewer
+      │
+      ▼
+   docker pull
 ```
 
-rather than requiring every reviewer to rebuild the full dependency stack locally.
+This avoids requiring every user to rebuild the full dependency stack locally.
 
 ---
 
-# 22. Running the CLI
+# 27. Running the CLI
 
 Start the environment:
 
@@ -1310,7 +1511,7 @@ Network Investigation Agent
 ...
 ```
 
-Then continue in the same session:
+Continue in the same session:
 
 ```text
 > Why do you believe this was a physical-layer problem?
@@ -1321,7 +1522,7 @@ Then continue in the same session:
 
 ---
 
-# 23. Database Inspection
+# 28. Database Inspection
 
 The supplied Adminer interface is available at:
 
@@ -1338,11 +1539,11 @@ Primary evidence tables:
 | `device_syslogs` | Timestamped device/network events |
 | `device_telemetry` | Time-series network/device measurements |
 
-The agent accesses these through controlled application tools rather than unrestricted model-generated SQL.
+The investigation agent accesses these tables through controlled application tools rather than unrestricted model-generated SQL.
 
 ---
 
-# 24. Repository Structure
+# 29. Repository Structure
 
 ```text
 .
@@ -1368,16 +1569,27 @@ The agent accesses these through controlled application tools rather than unrest
 │
 ├── eval/
 │   ├── run_eval.py
-│   │   └── end-to-end anomaly evaluation
+│   │   └── end-to-end evaluation across seeded anomalies
+│   │
+│   ├── reference_cases.py
+│   │   └── curated evidence benchmark definitions
+│   │
+│   ├── evaluate_retrieval.py
+│   │   └── retrieval evidence-recall evaluation
+│   │
+│   ├── evaluate_groundedness.py
+│   │   └── claim-level generation-groundedness evaluation
 │   │
 │   ├── test_thin_evidence.py
 │   │   └── evidence-scarcity behavior test
 │   │
 │   └── results/
-│       └── evaluation outputs
+│       ├── evaluation_results.csv
+│       ├── retrieval_results.csv
+│       └── groundedness_results.csv
 │
 ├── main.py
-│   └── stateful CLI / thread lifecycle
+│   └── stateful CLI and thread lifecycle
 │
 ├── streamlit_app.py
 │   └── optional demonstration UI
@@ -1390,7 +1602,7 @@ The agent accesses these through controlled application tools rather than unrest
 
 ---
 
-# 25. Requirement Coverage
+# 30. Requirement Coverage
 
 | Requirement | Implementation |
 |---|---|
@@ -1407,73 +1619,70 @@ The agent accesses these through controlled application tools rather than unrest
 | No repeated anomaly ID required | Yes |
 | General networking Q&A | Yes |
 | Avoid unnecessary DB query for general Q&A | Yes |
-| Evidence selection not hardcoded per anomaly | Yes |
-| LangGraph required | Yes |
+| Evidence selection not hardcoded by anomaly type | Yes |
+| LangGraph | Yes |
 | Explicit state | Yes |
-| Explicit nodes/edges | Yes |
+| Explicit nodes and edges | Yes |
 | Tool integration | Yes |
 | Memory/checkpointing | Yes |
 | Thin-evidence behavior | Tested |
-| Evaluation | Yes |
+| Retrieval evaluation | Yes |
+| Generation-grounding evaluation | Yes |
+| End-to-end evaluation | Yes |
 | Required interface-flap example | Yes |
 | Follow-up example | Yes |
 
 ---
 
-# 26. Design Summary
+# 31. Design Summary
 
-The central design principle is **controlled agent autonomy**.
+The main design principle is **controlled agent autonomy**.
 
 ```text
                     LLM
                      │
-          decides what evidence
-           is useful + interprets
-                     │
+                     │ decides what evidence is useful
+                     │ and interprets evidence
                      ▼
-                 LangGraph
+                  LangGraph
                      │
-            controls workflow,
-             state and loops
-                     │
+                     │ controls workflow,
+                     │ state and loops
                      ▼
               Python Tool Layer
                      │
-             validates actions
+                     │ validates actions
+                     ▼
+                  PostgreSQL
+                     │
+                     │ returns evidence
+                     ▼
+                  AgentState
                      │
                      ▼
-                 PostgreSQL
-                     │
-             grounded evidence
-                     │
-                     ▼
-                 AgentState
-                     │
-                     ▼
-              Structured RCA
+               Structured RCA
 ```
 
-The implementation deliberately avoids two extremes:
+The design avoids two extremes:
 
 ```text
-Fully hardcoded workflow                    Unconstrained LLM agent
-         │                                            │
-         └──────────────────┐      ┌──────────────────┘
-                            ▼      ▼
+Fully hardcoded workflow                  Unrestricted LLM agent
+          │                                         │
+          └────────────────┐       ┌────────────────┘
+                           ▼       ▼
                        THIS DESIGN
-                  Controlled Agent Autonomy
+                Controlled Agent Autonomy
 ```
 
-The LLM handles semantic reasoning.
+The responsibilities are intentionally separated:
 
-LangGraph handles state and control flow.
+- **LLM** — semantic reasoning and evidence interpretation
+- **LangGraph** — state, routing, control flow, and investigation loops
+- **Python** — deterministic validation and tool execution
+- **PostgreSQL** — investigation evidence
+- **Pydantic** — structured output validation
+- **Evaluation layer** — retrieval coverage, claim grounding, uncertainty behavior, and execution robustness
 
-Python handles deterministic validation and tool execution.
+The final RCA is designed to distinguish three things clearly:
 
-PostgreSQL provides the evidence.
-
-Pydantic schemas constrain the reasoning outputs.
-
-The final RCA explicitly distinguishes:
-
-**what the evidence supports, what remains uncertain, and what should be checked next.**
+> **What the evidence supports, what remains uncertain, and what should be checked next.**
